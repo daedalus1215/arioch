@@ -209,38 +209,48 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
 
     if matches!(app.mode, Mode::Search) {
         let mut lines = Vec::new();
+        // Calculate how many results fit in the available space
+        let available = area.height.saturating_sub(6) as usize; // borders + header + footer
+        let per_result = 2; // path line + optional tags line
+        let max_visible = (available / per_result).max(1);
+
         if app.search_results.is_empty() {
+            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "  No results",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Search by: path, tags, category, description",
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
             let total = app.search_results.len();
-            let visible_count = 30;
-            let shown = total.min(visible_count);
+            let shown = total.min(max_visible);
 
             lines.push(Line::from(Span::styled(
-                format!("  {} result(s)", total),
+                format!("  {} result(s) — showing {} ", total, shown),
                 Style::default().fg(Color::Gray),
             )));
             lines.push(Line::from(""));
 
-            for &idx in app.search_results.iter().take(shown) {
+            for (i, &idx) in app.search_results.iter().take(shown).enumerate() {
                 if let Some(entry) = app.registry.get_entry(idx) {
                     let is_selected = app.selected_entry == Some(idx);
                     let marker = if is_selected { "» " } else { "  " };
                     let style = if is_selected {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
                     lines.push(Line::from(Span::styled(
-                        format!("  {}[{}] {}", marker, idx, entry.path),
+                        format!("  {}{} {}", marker, i + 1, entry.path),
                         style.clone(),
                     )));
                     if !entry.tags.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            format!("       tags: [{}]", entry.tags.join(", ")),
+                            format!("        tags: [{}]  cat: {}", entry.tags.join(", "), entry.category),
                             Style::default().fg(Color::Yellow),
                         )));
                     }
@@ -250,18 +260,24 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
             if total > shown {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    format!("  ... and {} more", total - shown),
+                    format!("  ... {} more", total - shown),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
 
-            lines.push(Line::from(""));
+            // Fill remaining space with blank lines
+            while lines.len() < available + 4 {
+                lines.push(Line::from(""));
+            }
+
             lines.push(Line::from(Span::styled(
-                "  Enter:open first  /:refine search  Esc:back",
+                "  j/k:nav  Enter:open  /:refine  Esc:back",
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        let paragraph = Paragraph::new(lines).block(block);
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().bg(Color::Black));
         f.render_widget(paragraph, area);
         return;
     }
