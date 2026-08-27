@@ -60,6 +60,14 @@ impl Default for Config {
             exclude_paths: vec![
                 "/etc/ssl/certs".into(),
                 "/etc/ssl/certs.d".into(),
+                "~/.config/BraveSoftware".into(),
+                "~/.config/google-chrome".into(),
+                "~/.config/chromium".into(),
+                "~/.config/firefox".into(),
+                "~/.config/Code".into(),
+                "~/.config/VSCode".into(),
+                "~/.config/git".into(),
+                "~/.config/gh".into(),
             ],
             scan_patterns: vec![
                 "*.pub".into(),
