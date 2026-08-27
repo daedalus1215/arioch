@@ -55,6 +55,7 @@ pub struct App {
     pub bulk_prompt: Option<String>,
     pub bulk_input: String,
     pub last_mtime: Option<std::time::SystemTime>,
+    pub last_index_mtime: Option<std::time::SystemTime>,
     pub map_zoom: usize,
     pub map_scroll: usize,
     pub map_selected: Option<usize>,
@@ -97,6 +98,7 @@ impl App {
             bulk_prompt: None,
             bulk_input: String::new(),
             last_mtime: None,
+            last_index_mtime: None,
             map_zoom: 0,
             map_scroll: 0,
             map_selected: None,
@@ -112,6 +114,53 @@ impl App {
         }
         if self.config.refresh_interval == 0 {
             return;
+        }
+        // Watch index file for external changes
+        let index_path = {
+            let mut p = Config::config_dir();
+            p.push("arioch");
+            p.push("index.toml");
+            p
+        };
+        if let Ok(meta) = std::fs::metadata(&index_path) {
+            if let Ok(mtime) = meta.modified() {
+                if let Some(last) = self.last_index_mtime {
+                    if mtime != last {
+                        // Reload registry
+                        match Registry::load() {
+                            Ok(new_registry) => {
+                                let selected_path = self
+                                    .selected_entry
+                                    .and_then(|i| self.registry.get_entry(i))
+                                    .map(|e| e.path.clone());
+                                let entry_count = new_registry.entries.len();
+                                self.registry = new_registry;
+                                // Re-select by path if still exists
+                                if let Some(ref path) = selected_path {
+                                    self.selected_entry = self
+                                        .registry
+                                        .entries
+                                        .iter()
+                                        .position(|e| &e.path == path);
+                                }
+                                self.refresh_content();
+                                self.set_message(&format!(
+                                    "Index reloaded ({} entries)",
+                                    entry_count
+                                ));
+                                self.last_index_mtime = Some(mtime);
+                                return;
+                            }
+                            Err(e) => {
+                                self.set_message(&format!("Index reload failed: {}", e));
+                                self.last_index_mtime = Some(mtime);
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.last_index_mtime = Some(mtime);
+            }
         }
         if let Some(idx) = self.selected_entry {
             if let Some(entry) = self.registry.get_entry(idx) {
