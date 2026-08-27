@@ -143,12 +143,43 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+    // Compute scroll to keep selected entry visible
+    let visible_height = area.height.saturating_sub(2) as usize; // minus borders
+    let header_lines = 4; // title, blank, count, blank
+    let content_height = visible_height.saturating_sub(header_lines);
+
+    // Find the line index of the selected entry
+    let selected_line = if let Some(sel_idx) = app.selected_entry {
+        lines.iter().position(|line| {
+            if let Some(entry) = app.registry.get_entry(sel_idx) {
+                line.to_string().contains(&truncate(&entry.path, SIDEBAR_WIDTH - 4))
+            } else {
+                false
+            }
+        })
+    } else {
+        None
+    };
+
+    let scroll = if let Some(line_idx) = selected_line {
+        if line_idx < header_lines {
+            0
+        } else if line_idx + content_height >= lines.len() {
+            lines.len().saturating_sub(content_height)
+        } else {
+            line_idx.saturating_sub(header_lines)
+        }
+    } else {
+        0
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let paragraph = Paragraph::new(lines).block(block);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll as u16, 0));
 
     f.render_widget(paragraph, area);
 }
