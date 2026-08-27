@@ -469,21 +469,35 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
             }
         }
 
-        // Edges
+        // Edges (bidirectional-aware)
         if let Some(entry) = app.registry.get_entry(*idx) {
             for rel in &entry.related {
                 let exists = name_to_idx.contains_key(rel.as_str());
-                let arrow = if exists { "──▶" } else { "──✗" };
-                let color = if exists { Color::Green } else { Color::Red };
-                let suffix = if exists {
-                    String::new()
+                if exists {
+                    // Check if target also lists us (bidirectional)
+                    let target_idx = name_to_idx[rel.as_str()];
+                    let target_entry = &app.registry.entries[target_idx];
+                    let target_name = target_entry
+                        .alias
+                        .as_deref()
+                        .unwrap_or_else(|| target_entry.path.rsplit('/').next().unwrap_or(&target_entry.path));
+                    let bidirectional = target_entry.related.iter().any(|r| {
+                        // Match by alias or filename
+                        r == name || r == target_name
+                            || r == entry.path.rsplit('/').next().unwrap_or(&entry.path)
+                            || r == entry.alias.as_deref().unwrap_or("")
+                    });
+                    let arrow = if bidirectional { "═══▶" } else { "───▶" };
+                    lines.push(Line::from(Span::styled(
+                        format!("      {} {}", arrow, rel),
+                        Style::default().fg(Color::Green),
+                    )));
                 } else {
-                    " (missing)".to_string()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("      {} {}{}", arrow, rel, suffix),
-                    Style::default().fg(color),
-                )));
+                    lines.push(Line::from(Span::styled(
+                        format!("      ──✗ {} (missing)", rel),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
             }
         }
 
