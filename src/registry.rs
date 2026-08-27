@@ -114,23 +114,35 @@ impl Registry {
     pub fn scan_with_config(
         &mut self,
         scan_paths: &[String],
+        exclude_paths: &[String],
         scan_patterns: &[String],
         scan_depth: usize,
     ) -> Vec<PathBuf> {
         self.suggestions.clear();
         let home = std::env::var("HOME").unwrap_or_default();
 
+        // Expand exclude paths
+        let excludes: Vec<String> = exclude_paths
+            .iter()
+            .map(|p| p.replace("~", &home))
+            .collect();
+
         for scan_path in scan_paths {
             let expanded = scan_path.replace("~", &home);
             let path = PathBuf::from(expanded);
 
             if path.is_file() {
-                if self.matches_pattern_with_config(&path, scan_patterns) {
+                if !self.is_excluded(&path, &excludes)
+                    && self.matches_pattern_with_config(&path, scan_patterns)
+                {
                     self.suggestions.push(path);
                 }
             } else if path.is_dir() {
                 for entry in walkdir_simple_depth(&path, scan_depth) {
-                    if entry.is_file() && self.matches_pattern_with_config(&entry, scan_patterns) {
+                    if entry.is_file()
+                        && !self.is_excluded(&entry, &excludes)
+                        && self.matches_pattern_with_config(&entry, scan_patterns)
+                    {
                         self.suggestions.push(entry);
                     }
                 }
@@ -140,6 +152,11 @@ impl Registry {
         self.suggestions.sort();
         self.suggestions.dedup();
         self.suggestions.clone()
+    }
+
+    fn is_excluded(&self, path: &Path, excludes: &[String]) -> bool {
+        let path_str = path.to_string_lossy();
+        excludes.iter().any(|ex| path_str.starts_with(ex.as_str()))
     }
 
     fn matches_pattern_with_config(&self, path: &Path, patterns: &[String]) -> bool {

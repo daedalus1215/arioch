@@ -25,6 +25,7 @@ pub fn active_config_dir() -> PathBuf {
 #[serde(default)]
 pub struct Config {
     pub scan_paths: Vec<String>,
+    pub exclude_paths: Vec<String>,
     pub scan_patterns: Vec<String>,
     pub scan_depth: usize,
     pub max_file_size: usize,
@@ -55,6 +56,10 @@ impl Default for Config {
                 "/etc/ssh".into(),
                 "/etc/ssl".into(),
                 "~/.gnupg".into(),
+            ],
+            exclude_paths: vec![
+                "/etc/ssl/certs".into(),
+                "/etc/ssl/certs.d".into(),
             ],
             scan_patterns: vec![
                 "*.pub".into(),

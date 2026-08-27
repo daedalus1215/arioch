@@ -272,6 +272,7 @@ fn cmd_scan(registry: &mut Registry, json: bool) -> anyhow::Result<()> {
     let config = config::Config::load();
     registry.scan_with_config(
         &config.scan_paths,
+        &config.exclude_paths,
         &config.scan_patterns,
         config.scan_depth,
     );

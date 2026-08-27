@@ -379,6 +379,7 @@ impl App {
                 self.mode = Mode::Suggestions;
                 self.registry.scan_with_config(
                     &self.config.scan_paths,
+                    &self.config.exclude_paths,
                     &self.config.scan_patterns,
                     self.config.scan_depth,
                 );
@@ -625,6 +626,7 @@ impl App {
                 // Re-scan
                 self.registry.scan_with_config(
                     &self.config.scan_paths,
+                    &self.config.exclude_paths,
                     &self.config.scan_patterns,
                     self.config.scan_depth,
                 );
