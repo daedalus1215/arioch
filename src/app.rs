@@ -788,9 +788,14 @@ impl App {
                 let editor = self.config.editor();
                 let mut cmd = std::process::Command::new(&editor);
                 cmd.arg(&path);
-                match cmd.status() {
+                // Disable raw mode while editor runs, re-enable after
+                let _ = crossterm::terminal::disable_raw_mode();
+                let status = cmd.status();
+                let _ = crossterm::terminal::enable_raw_mode();
+                match status {
                     Ok(_) => {
                         self.refresh_content();
+                        self.last_mtime = None;
                         self.set_message(&format!("Edited: {}", entry_path));
                     }
                     Err(e) => {
