@@ -48,6 +48,7 @@ pub struct App {
     pub file_error: Option<String>,
     pub dialog: Option<DialogState>,
     pub suggestion_selected: usize,
+    pub suggestion_scroll: usize,
     pub suggestion_filter: String,
     pub suggestion_accepted: usize,
     pub multi_selected: Vec<usize>,
@@ -87,6 +88,7 @@ impl App {
             file_error: None,
             dialog: None,
             suggestion_selected: 0,
+            suggestion_scroll: 0,
             suggestion_filter: String::new(),
             suggestion_accepted: 0,
             multi_selected: Vec::new(),
@@ -438,6 +440,9 @@ impl App {
                         .unwrap_or(0);
                     let next = (pos + 1).min(filtered.len() - 1);
                     self.suggestion_selected = filtered[next];
+                    if next >= self.suggestion_scroll + 12 {
+                        self.suggestion_scroll = next - 11;
+                    }
                 }
             }
             crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
@@ -448,6 +453,9 @@ impl App {
                         .unwrap_or(0);
                     let prev = if pos > 0 { pos - 1 } else { filtered.len() - 1 };
                     self.suggestion_selected = filtered[prev];
+                    if prev < self.suggestion_scroll {
+                        self.suggestion_scroll = prev;
+                    }
                 }
             }
             crossterm::event::KeyCode::Char('a') => {

@@ -469,12 +469,27 @@ fn render_suggestions(f: &mut Frame, area: Rect, app: &App) {
 
     // Build filtered rows
     let filter = app.suggestion_filter.to_lowercase();
-    let mut rows = Vec::new();
+    let mut all_indices: Vec<usize> = Vec::new();
     for (i, p) in app.registry.suggestions.iter().enumerate() {
         let path = p.to_string_lossy().to_string();
         if !filter.is_empty() && !path.to_lowercase().contains(&filter) {
             continue;
         }
+        all_indices.push(i);
+    }
+
+    // Apply scroll window
+    let visible: Vec<usize> = all_indices
+        .iter()
+        .skip(app.suggestion_scroll)
+        .take(14)
+        .cloned()
+        .collect();
+
+    let mut rows = Vec::new();
+    for &i in &visible {
+        let p = &app.registry.suggestions[i];
+        let path = p.to_string_lossy().to_string();
         let filename: String = p
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -485,14 +500,15 @@ fn render_suggestions(f: &mut Frame, area: Rect, app: &App) {
 
         let row_style = if is_selected {
             Style::default()
-                .fg(Color::White)
+                .fg(Color::Black)
+                .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
 
         rows.push(Row::new(vec![
-            Span::styled(format!("{}{}", marker, path), row_style),
+            Span::styled(format!("{}{}", marker, path), row_style.clone()),
             Span::styled(filename, row_style),
         ]));
     }
@@ -509,7 +525,6 @@ fn render_suggestions(f: &mut Frame, area: Rect, app: &App) {
     let table = table.block(block);
     f.render_widget(table, area);
 }
-
 fn render_history(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(Span::styled(
@@ -614,7 +629,7 @@ fn render_investigate(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(vec![
                 Span::styled("  » ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    format!("{}{}", dk.key, section_str),
+                    format!("L{} {}{}", dk.line + 1, dk.key, section_str),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -626,7 +641,7 @@ fn render_investigate(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(vec![
                 Span::styled("    ", Style::default()),
                 Span::styled(
-                    format!("{}{}", dk.key, section_str),
+                    format!("L{} {}{}", dk.line + 1, dk.key, section_str),
                     Style::default().fg(Color::Reset),
                 ),
                 Span::styled(
