@@ -84,10 +84,10 @@ impl App {
             sidebar_expanded: true,
             sidebar_width: 35,
             search_query: String::new(),
+            search_results: Vec::new(),
             scroll_offset: 0,
             message: None,
             show_help: false,
-            quit: false,
             file_content: None,
             file_error: None,
             dialog: None,
@@ -106,6 +106,7 @@ impl App {
             investigate_keys: Vec::new(),
             investigate_selected: 0,
             investigate_scroll: 0,
+            quit: false,
         }
     }
 
