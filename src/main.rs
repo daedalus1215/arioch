@@ -56,8 +56,19 @@ enum Command {
     Map,
     /// Run scan and print suggestions
     Scan,
+    /// Export index to a JSON file
+    Export {
+        #[arg(short, long, default_value = "arioch-index.json")]
+        output: String,
+    },
+    /// Import entries from a JSON file
+    Import {
+        file: String,
+        /// Replace existing entries instead of merging
+        #[arg(short, long)]
+        replace: bool,
+    },
 }
-
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -90,9 +101,10 @@ fn main() -> anyhow::Result<()> {
         Command::Tag { path, tag } => cmd_tag(&mut registry, &path, &tag, cli.json),
         Command::Map => cmd_map(&registry, cli.json),
         Command::Scan => cmd_scan(&mut registry, cli.json),
+        Command::Export { output } => cmd_export(&registry, &output),
+        Command::Import { file, replace } => cmd_import(&mut registry, &file, replace),
     }
 }
-
 fn cmd_list(registry: &Registry, json: bool) -> anyhow::Result<()> {
     if json {
         let entries: Vec<serde_json::Value> = registry
@@ -362,5 +374,37 @@ fn restore_terminal() -> anyhow::Result<()> {
         crossterm::terminal::DisableLineWrap,
     )?;
     crossterm::terminal::disable_raw_mode()?;
+    Ok(())
+}
+
+fn cmd_export(registry: &Registry, output: &str) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(&registry.entries)?;
+    std::fs::write(output, &json)?;
+    println!("Exported {} entries to {}", registry.entries.len(), output);
+    Ok(())
+}
+
+fn cmd_import(registry: &mut Registry, file: &str, replace: bool) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(file)?;
+    let imported: Vec<Entry> = serde_json::from_str(&content)?;
+    let count = imported.len();
+
+    if replace {
+        registry.entries = imported;
+        println!("Replaced index with {} entries from {}", count, file);
+    } else {
+        // Merge: only add entries that don't already exist (by path)
+        let existing: Vec<String> = registry.entries.iter().map(|e| e.path.clone()).collect();
+        let mut added = 0;
+        for entry in imported {
+            if !existing.contains(&entry.path) {
+                registry.entries.push(entry);
+                added += 1;
+            }
+        }
+        println!("Imported {} new entries from {} ({} skipped)", added, file, count - added);
+    }
+
+    registry.save()?;
     Ok(())
 }
