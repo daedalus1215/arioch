@@ -312,6 +312,9 @@ impl App {
             crossterm::event::KeyCode::Char('i') => {
                 self.open_investigate();
             }
+            crossterm::event::KeyCode::Char('c') => {
+                self.copy_path();
+            }
             crossterm::event::KeyCode::Char('s') => {
                 self.mode = Mode::Suggestions;
                 self.registry.scan_with_config(
@@ -334,9 +337,6 @@ impl App {
             }
             crossterm::event::KeyCode::Char('d') => {
                 self.delete_selected();
-            }
-            crossterm::event::KeyCode::Char('c') => {
-                self.change_category();
             }
             crossterm::event::KeyCode::Char('r') => {
                 self.last_mtime = None;
@@ -376,11 +376,15 @@ impl App {
                     self.multi_selected.len()
                 ));
             }
-            crossterm::event::KeyCode::Char('C') if !self.multi_selected.is_empty() => {
-                self.bulk_prompt = Some(format!(
-                    "Set category for {} entries: [type category + Enter]",
-                    self.multi_selected.len()
-                ));
+            crossterm::event::KeyCode::Char('C') => {
+                if self.multi_selected.is_empty() {
+                    self.change_category();
+                } else {
+                    self.bulk_prompt = Some(format!(
+                        "Set category for {} entries: [type category + Enter]",
+                        self.multi_selected.len()
+                    ));
+                }
             }
             crossterm::event::KeyCode::Char('D') if !self.multi_selected.is_empty() => {
                 self.bulk_prompt = Some(format!(
@@ -816,6 +820,64 @@ impl App {
         }
     }
 
+    fn copy_path(&mut self) {
+        if let Some(idx) = self.selected_entry {
+            if let Some(entry) = self.registry.get_entry(idx) {
+                let path = expand_path(&entry.path);
+                let copied = self.copy_to_clipboard(&path);
+                if copied {
+                    self.set_message(&format!("Copied: {}", path));
+                } else {
+                    self.set_message("No clipboard tool found (install xclip or wl-clipboard)");
+                }
+            }
+        }
+    }
+
+    fn copy_to_clipboard(&self, text: &str) -> bool {
+        // Try wl-copy (Wayland)
+        if std::process::Command::new("wl-copy")
+            .arg(text)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        // Try xclip (X11)
+        if let Ok(mut child) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                if stdin.write_all(text.as_bytes()).is_ok() {
+                    drop(stdin);
+                    if child.wait().map(|s| s.success()).unwrap_or(false) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Try xsel (X11 fallback)
+        if let Ok(mut child) = std::process::Command::new("xsel")
+            .args(["--clipboard", "--input"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                if stdin.write_all(text.as_bytes()).is_ok() {
+                    drop(stdin);
+                    if child.wait().map(|s| s.success()).unwrap_or(false) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
     fn add_entry_dialog(&mut self) {
         self.mode = Mode::Dialog;
         self.dialog = Some(DialogState {
