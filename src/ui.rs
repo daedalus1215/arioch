@@ -178,17 +178,51 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
-            for &idx in &app.search_results {
+            let total = app.search_results.len();
+            let visible_count = 30;
+            let shown = total.min(visible_count);
+
+            lines.push(Line::from(Span::styled(
+                format!("  {} result(s)", total),
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(""));
+
+            for &idx in app.search_results.iter().take(shown) {
                 if let Some(entry) = app.registry.get_entry(idx) {
-                    lines.push(Line::from(format!("  [{}] {}", idx, entry.path)));
+                    let is_selected = app.selected_entry == Some(idx);
+                    let marker = if is_selected { "» " } else { "  " };
+                    let style = if is_selected {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}[{}] {}", marker, idx, entry.path),
+                        style.clone(),
+                    )));
                     if !entry.tags.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            format!("    tags: [{}]", entry.tags.join(", ")),
+                            format!("       tags: [{}]", entry.tags.join(", ")),
                             Style::default().fg(Color::Yellow),
                         )));
                     }
                 }
             }
+
+            if total > shown {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  ... and {} more", total - shown),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Enter:open first  /:refine search  Esc:back",
+                Style::default().fg(Color::DarkGray),
+            )));
         }
         let paragraph = Paragraph::new(lines).block(block);
         f.render_widget(paragraph, area);
