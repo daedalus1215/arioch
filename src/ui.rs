@@ -5,6 +5,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 const SIDEBAR_WIDTH: usize = 35;
 
@@ -272,6 +274,32 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
                 format!("  Path: {}", entry.path),
                 Style::default().fg(Color::Cyan),
             )));
+            // File metadata
+            let meta_path = expand_path_for_check(&entry.path);
+            if let Ok(meta) = std::fs::metadata(&meta_path) {
+                let size = human_size(meta.len());
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| {
+                        let secs = d.as_secs() as i64;
+                        // Simple UTC format
+                        let days = secs / 86400;
+                        let rem = secs % 86400;
+                        let h = rem / 3600;
+                        let m = (rem % 3600) / 60;
+                        // Convert days to approximate date
+                        let (year, month, day) = days_to_ymd(days);
+                        format!("{}-{:02}-{:02} {:02}:{:02}", year, month, day, h, m)
+                    })
+                    .unwrap_or_else(|| "?".into());
+                let perms = meta.permissions().mode() & 0o777;
+                lines.push(Line::from(Span::styled(
+                    format!("  Size: {}  Modified: {}  Perms: {:o}", size, mtime, perms),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
             if !entry.category.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!("  Category: {}", entry.category),
@@ -1024,4 +1052,30 @@ fn render_help(f: &mut Frame, _app: &App) {
         .block(block)
         .style(Style::default().bg(Color::Black));
     f.render_widget(paragraph, popup);
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn days_to_ymd(days: i64) -> (i64, i64, i64) {
+    // Simple civil-from-days algorithm (Howard Hinnant)
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as i64, d as i64)
 }
