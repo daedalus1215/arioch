@@ -297,6 +297,17 @@ impl App {
             crossterm::event::KeyCode::Char('l') | crossterm::event::KeyCode::Right => {
                 self.sidebar_expanded = true;
             }
+            crossterm::event::KeyCode::Char('1')
+            | crossterm::event::KeyCode::Char('2')
+            | crossterm::event::KeyCode::Char('3')
+            | crossterm::event::KeyCode::Char('4')
+            | crossterm::event::KeyCode::Char('5')
+            | crossterm::event::KeyCode::Char('6')
+            | crossterm::event::KeyCode::Char('7')
+            | crossterm::event::KeyCode::Char('8')
+            | crossterm::event::KeyCode::Char('9') => {
+                self.quick_jump(key.code);
+            }
             crossterm::event::KeyCode::Char('m') => {
                 self.mode = if matches!(self.mode, Mode::Map) {
                     Mode::View
@@ -717,6 +728,16 @@ impl App {
         order
     }
 
+    fn quick_jump(&mut self, code: crossterm::event::KeyCode) {
+        if let crossterm::event::KeyCode::Char(c) = code {
+            let n = c.to_digit(10).unwrap_or(0) as usize - 1;
+            let order = self.visual_order();
+            if n < order.len() {
+                self.selected_entry = Some(order[n]);
+                self.refresh_content();
+            }
+        }
+    }
     fn select_next(&mut self) {
         let order = self.visual_order();
         if order.is_empty() {
