@@ -162,4 +162,58 @@ impl Config {
             .or_else(|| std::env::var("EDITOR").ok())
             .unwrap_or_else(|| "nano".to_string())
     }
+
+    /// Resolve a category name to a terminal color. Uses config overrides if set.
+    pub fn category_color(&self, category: &str) -> ratatui::style::Color {
+        // Check for custom override
+        let custom = match category {
+            "ssh-keys" | "ssh" => &self.colors.ssh_keys,
+            "cloud-creds" | "credentials" | "creds" => &self.colors.cloud_creds,
+            "os-config" | "config" | "configs" | "system" => &self.colors.system_config,
+            "certs" | "certificates" | "ssl" => &self.colors.certificates,
+            "gpg" | "keys" => &self.colors.gpg,
+            "secrets" | "env" => &self.colors.secrets,
+            "app-config" | "app" => &self.colors.app_config,
+            _ => &self.colors.other,
+        };
+
+        if let Some(ref color_str) = custom {
+            return parse_color(color_str);
+        }
+
+        // Defaults
+        match category {
+            "ssh-keys" | "ssh" => ratatui::style::Color::Green,
+            "cloud-creds" | "credentials" | "creds" => ratatui::style::Color::Blue,
+            "os-config" | "config" | "configs" | "system" => ratatui::style::Color::Yellow,
+            "certs" | "certificates" | "ssl" => ratatui::style::Color::Red,
+            "gpg" | "keys" => ratatui::style::Color::Magenta,
+            "secrets" | "env" => ratatui::style::Color::Cyan,
+            "app-config" | "app" => ratatui::style::Color::Green,
+            _ => ratatui::style::Color::Gray,
+        }
+    }
+}
+
+fn parse_color(s: &str) -> ratatui::style::Color {
+    match s.to_lowercase().as_str() {
+        "red" => ratatui::style::Color::Red,
+        "green" => ratatui::style::Color::Green,
+        "yellow" => ratatui::style::Color::Yellow,
+        "blue" => ratatui::style::Color::Blue,
+        "magenta" => ratatui::style::Color::Magenta,
+        "cyan" => ratatui::style::Color::Cyan,
+        "gray" | "grey" => ratatui::style::Color::Gray,
+        "darkgray" | "darkgrey" => ratatui::style::Color::DarkGray,
+        "white" => ratatui::style::Color::White,
+        "black" => ratatui::style::Color::Black,
+        // Hex colors like "#ff0000"
+        _ if s.starts_with('#') && s.len() == 7 => {
+            let r = u8::from_str_radix(&s[1..3], 16).unwrap_or(0);
+            let g = u8::from_str_radix(&s[3..5], 16).unwrap_or(0);
+            let b = u8::from_str_radix(&s[5..7], 16).unwrap_or(0);
+            ratatui::style::Color::Rgb(r, g, b)
+        }
+        _ => ratatui::style::Color::Gray,
+    }
 }

@@ -451,16 +451,8 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // Category color mapping
-    fn cat_color(cat: &str) -> Color {
-        match cat {
-            "ssh-keys" | "ssh" => Color::Green,
-            "configs" | "config" => Color::Yellow,
-            "certs" | "certificates" => Color::Red,
-            "creds" | "credentials" | "cloud-creds" => Color::Blue,
-            _ => Color::Gray,
-        }
-    }
+    // Use config colors (falls back to defaults)
+    let cat_color = |cat: &str| app.config.category_color(cat);
 
     // Build node list with resolved names
     let nodes: Vec<(usize, String, &str)> = app
