@@ -56,6 +56,11 @@ enum Command {
     Map,
     /// Run scan and print suggestions
     Scan,
+    /// Initialize a new config/index at a path (default: ./arioch)
+    Init {
+        #[arg(default_value = "./arioch")]
+        path: String,
+    },
     /// Export index to a JSON file
     Export {
         #[arg(short, long, default_value = "arioch-index.json")]
@@ -101,6 +106,7 @@ fn main() -> anyhow::Result<()> {
         Command::Tag { path, tag } => cmd_tag(&mut registry, &path, &tag, cli.json),
         Command::Map => cmd_map(&registry, cli.json),
         Command::Scan => cmd_scan(&mut registry, cli.json),
+        Command::Init { path } => cmd_init(&path),
         Command::Export { output } => cmd_export(&registry, &output),
         Command::Import { file, replace } => cmd_import(&mut registry, &file, replace),
     }
@@ -406,5 +412,32 @@ fn cmd_import(registry: &mut Registry, file: &str, replace: bool) -> anyhow::Res
     }
 
     registry.save()?;
+    Ok(())
+}
+
+fn cmd_init(path: &str) -> anyhow::Result<()> {
+    let dir = std::path::Path::new(path);
+    if dir.exists() {
+        anyhow::bail!("Directory already exists: {}", path);
+    }
+    std::fs::create_dir_all(dir)?;
+
+    let config_content = r#"# arioch config
+scan_paths = ["~/.ssh", "~/.config", "/etc/ssh"]
+exclude_paths = ["/etc/ssl/certs"]
+scan_patterns = ["id_*", "*.pem", "*.crt", "*.key", "config", "*.conf", "*.toml", "*.yaml", "credentials", "*.env"]
+scan_depth = 3
+max_file_size = 1048576
+refresh_interval = 2
+# editor = "nvim"
+"#;
+
+    let index_content = "# arioch — security file index\n# Managed by arioch. Safe to edit by hand.\n";
+
+    std::fs::write(dir.join("config.toml"), config_content)?;
+    std::fs::write(dir.join("index.toml"), index_content)?;
+
+    println!("Initialized arioch config at {}", path);
+    println!("  Use with: arioch --config {}", path);
     Ok(())
 }
