@@ -39,6 +39,7 @@ pub struct App {
     pub selected_category: Option<String>,
     pub mode: Mode,
     pub sidebar_expanded: bool,
+    pub sidebar_width: usize,
     pub search_query: String,
     pub search_results: Vec<usize>,
     pub scroll_offset: usize,
@@ -81,8 +82,8 @@ impl App {
             selected_category: None,
             mode: Mode::View,
             sidebar_expanded: true,
+            sidebar_width: 35,
             search_query: String::new(),
-            search_results: Vec::new(),
             scroll_offset: 0,
             message: None,
             show_help: false,
@@ -345,6 +346,12 @@ impl App {
             }
             crossterm::event::KeyCode::Char('l') | crossterm::event::KeyCode::Right => {
                 self.sidebar_expanded = true;
+            }
+            crossterm::event::KeyCode::Char('<') => {
+                self.sidebar_width = (self.sidebar_width.saturating_sub(2)).max(10);
+            }
+            crossterm::event::KeyCode::Char('>') => {
+                self.sidebar_width = (self.sidebar_width + 2).min(80);
             }
             crossterm::event::KeyCode::Char('1')
             | crossterm::event::KeyCode::Char('2')

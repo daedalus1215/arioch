@@ -8,7 +8,6 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-const SIDEBAR_WIDTH: usize = 35;
 
 pub fn render(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -23,11 +22,22 @@ pub fn render(f: &mut Frame, app: &App) {
         return;
     }
 
+    // Search mode: full screen, no sidebar
+    if matches!(app.mode, Mode::Search) {
+        render_main(f, top, app);
+        render_status(f, bottom, app);
+        if app.show_help {
+            render_help(f, app);
+        }
+        return;
+    }
+
+    let sidebar_width = app.sidebar_width as u16;
     let (sidebar_area, main_chunk) = if app.sidebar_expanded {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(SIDEBAR_WIDTH as u16),
+                Constraint::Length(sidebar_width),
                 Constraint::Min(1),
             ])
             .split(top);
@@ -112,7 +122,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
 
                 let (name, style) = if is_multi {
                     (
-                        format!("   ■ {}", truncate(&entry.path, SIDEBAR_WIDTH - 4)),
+                        format!("   ■ {}", truncate(&entry.path, app.sidebar_width - 4)),
                         Style::default()
                             .fg(Color::Black)
                             .bg(Color::Yellow)
@@ -120,7 +130,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
                     )
                 } else if is_selected {
                     (
-                        format!("   » {}", truncate(&entry.path, SIDEBAR_WIDTH - 4)),
+                        format!("   » {}", truncate(&entry.path, app.sidebar_width - 4)),
                         Style::default()
                             .fg(Color::White)
                             .bg(Color::Blue)
@@ -128,7 +138,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
                     )
                 } else {
                     (
-                        format!("    {}", truncate(&entry.path, SIDEBAR_WIDTH - 3)),
+                        format!("    {}", truncate(&entry.path, app.sidebar_width - 3)),
                         Style::default().fg(Color::DarkGray),
                     )
                 };
@@ -154,7 +164,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let selected_line = if let Some(sel_idx) = app.selected_entry {
         lines.iter().position(|line| {
             if let Some(entry) = app.registry.get_entry(sel_idx) {
-                line.to_string().contains(&truncate(&entry.path, SIDEBAR_WIDTH - 4))
+                line.to_string().contains(&truncate(&entry.path, app.sidebar_width - 4))
             } else {
                 false
             }
