@@ -43,7 +43,8 @@ pub struct App {
     pub search_results: Vec<usize>,
     pub scroll_offset: usize,
     pub message: Option<String>,
-    pub quit: bool,
+    pub show_help: bool,
+    pub sidebar_scroll: usize,
     pub file_content: Option<String>,
     pub file_error: Option<String>,
     pub dialog: Option<DialogState>,
@@ -61,6 +62,7 @@ pub struct App {
     pub investigate_keys: Vec<crate::knowledge::DetectedKey>,
     pub investigate_selected: usize,
     pub investigate_scroll: usize,
+    pub quit: bool,
 }
 
 impl App {
@@ -83,6 +85,8 @@ impl App {
             search_results: Vec::new(),
             scroll_offset: 0,
             message: None,
+            show_help: false,
+            sidebar_scroll: 0,
             quit: false,
             file_content: None,
             file_error: None,
@@ -208,6 +212,14 @@ impl App {
         }
 
         match key.code {
+            crossterm::event::KeyCode::Char('?') => {
+                self.show_help = !self.show_help;
+                return;
+            }
+            crossterm::event::KeyCode::Esc if self.show_help => {
+                self.show_help = false;
+                return;
+            }
             crossterm::event::KeyCode::Char('q') | crossterm::event::KeyCode::Esc => {
                 if self.mode == Mode::Search {
                     self.mode = Mode::View;

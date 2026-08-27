@@ -51,6 +51,10 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.mode == Mode::Dialog {
         render_dialog(f, app);
     }
+
+    if app.show_help {
+        render_help(f, app);
+    }
 }
 
 fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -925,4 +929,54 @@ fn expand_path_for_check(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+fn render_help(f: &mut Frame, _app: &App) {
+    let area = f.area();
+    let width = (area.width / 2).min(50).max(30);
+    let height = (area.height / 2).min(28).max(20);
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Keybindings ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let lines = vec![
+        Line::from(Span::styled("  Navigation", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from("  j / Down       next entry"),
+        Line::from("  k / Up         prev entry"),
+        Line::from("  h / Left       collapse sidebar"),
+        Line::from("  l / Right      expand sidebar"),
+        Line::from(""),
+        Line::from(Span::styled("  Actions", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from("  Enter          open file in $EDITOR"),
+        Line::from("  e              edit file"),
+        Line::from("  r              refresh / rescan"),
+        Line::from("  a              add entry"),
+        Line::from("  x              remove entry"),
+        Line::from("  s              scan for files"),
+        Line::from("  c              copy path to clipboard"),
+        Line::from(""),
+        Line::from(Span::styled("  Views", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from("  m              relationship map"),
+        Line::from("  i              investigate config keys"),
+        Line::from("  g              audit history"),
+        Line::from("  /              search"),
+        Line::from("  t              toggle tag filter"),
+        Line::from(""),
+        Line::from(Span::styled("  Misc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from("  ?              toggle this help"),
+        Line::from("  Esc / q        back / quit"),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(paragraph, popup);
 }
