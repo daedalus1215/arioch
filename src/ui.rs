@@ -362,6 +362,76 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
                     format!("  ERROR: {}", error),
                     Style::default().fg(Color::Red),
                 )));
+            } else if app.show_diff {
+                // Diff view: compare baseline vs current
+                let baseline = app.baseline_content.as_deref().unwrap_or("");
+                let current = app.file_content.as_deref().unwrap_or("");
+
+                if baseline == current {
+                    lines.push(Line::from(Span::styled(
+                        "  (no changes since first load)",
+                        Style::default().fg(Color::Green),
+                    )));
+                } else {
+                    let baseline_lines: Vec<&str> = baseline.lines().collect();
+                    let current_lines: Vec<&str> = current.lines().collect();
+                    let max_len = baseline_lines.len().max(current_lines.len());
+
+                    let visible = (area.height as usize).saturating_sub(12);
+                    let visible = visible.max(1);
+                    let start = app.scroll_offset.min(max_len.saturating_sub(visible));
+
+                    let mut added = 0;
+                    let mut removed = 0;
+
+                    for i in start..(start + visible).min(max_len) {
+                        let b = baseline_lines.get(i).copied();
+                        let c = current_lines.get(i).copied();
+
+                        match (b, c) {
+                            (None, Some(cl)) => {
+                                lines.push(Line::from(Span::styled(
+                                    format!("  + {}", cl),
+                                    Style::default().fg(Color::Green),
+                                )));
+                                added += 1;
+                            }
+                            (Some(bl), None) => {
+                                lines.push(Line::from(Span::styled(
+                                    format!("  - {}", bl),
+                                    Style::default().fg(Color::Red),
+                                )));
+                                removed += 1;
+                            }
+                            (Some(bl), Some(cl)) if bl != cl => {
+                                lines.push(Line::from(Span::styled(
+                                    format!("  - {}", bl),
+                                    Style::default().fg(Color::Red),
+                                )));
+                                lines.push(Line::from(Span::styled(
+                                    format!("  + {}", cl),
+                                    Style::default().fg(Color::Green),
+                                )));
+                                added += 1;
+                                removed += 1;
+                            }
+                            (Some(_), Some(_)) => {
+                                lines.push(Line::from(Span::styled(
+                                    format!("    {}", c.unwrap()),
+                                    Style::default().fg(Color::DarkGray),
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("  +{} added  -{} removed  (d:toggle diff)  [{}%]", added, removed,
+                            if max_len > 0 { app.scroll_offset * 100 / max_len } else { 0 }),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
             } else if let Some(ref content) = app.file_content {
                 let total_lines = content.lines().count();
                 let visible = (area.height as usize).saturating_sub(12);

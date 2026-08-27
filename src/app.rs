@@ -46,6 +46,9 @@ pub struct App {
     pub message: Option<String>,
     pub show_help: bool,
     pub file_content: Option<String>,
+    pub baseline_content: Option<String>,
+    pub baseline_entry: Option<usize>,
+    pub show_diff: bool,
     pub file_error: Option<String>,
     pub dialog: Option<DialogState>,
     pub suggestion_selected: usize,
@@ -89,6 +92,9 @@ impl App {
             message: None,
             show_help: false,
             file_content: None,
+            baseline_content: None,
+            baseline_entry: None,
+            show_diff: false,
             file_error: None,
             dialog: None,
             suggestion_selected: 0,
@@ -401,10 +407,13 @@ impl App {
             crossterm::event::KeyCode::Char('e') => {
                 self.open_editor();
             }
+            crossterm::event::KeyCode::Char('d') => {
+                self.show_diff = !self.show_diff;
+            }
             crossterm::event::KeyCode::Char('a') => {
                 self.add_entry_dialog();
             }
-            crossterm::event::KeyCode::Char('d') => {
+            crossterm::event::KeyCode::Char('x') => {
                 self.delete_selected();
             }
             crossterm::event::KeyCode::Char('r') => {
@@ -864,6 +873,11 @@ impl App {
 
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
+                        // Set baseline on first load of this entry
+                        if self.baseline_entry != Some(idx) {
+                            self.baseline_content = Some(content.clone());
+                            self.baseline_entry = Some(idx);
+                        }
                         self.file_content = Some(content);
                     }
                     Err(e) => {
