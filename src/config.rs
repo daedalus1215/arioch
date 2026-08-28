@@ -157,10 +157,16 @@ impl Config {
     }
 
     pub fn editor(&self) -> String {
-        self.editor
+        let editor = self
+            .editor
             .clone()
             .or_else(|| std::env::var("EDITOR").ok())
-            .unwrap_or_else(|| "nano".to_string())
+            .unwrap_or_else(|| "nano".to_string());
+        // Guard against no-op editors (common in scripts: EDITOR=true)
+        match editor.as_str() {
+            "true" | "false" | ":" | "" => "nano".to_string(),
+            _ => editor,
+        }
     }
 
     /// Resolve a category name to a terminal color. Uses config overrides if set.
