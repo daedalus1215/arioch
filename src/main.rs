@@ -1,4 +1,5 @@
 mod app;
+mod annotations;
 mod config;
 mod knowledge;
 mod registry;

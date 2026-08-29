@@ -465,3 +465,122 @@ certificates = "yellow"
 - Set `refresh_interval = 0` → no auto-refresh
 - Invalid TOML in config → warning, defaults used
 - Set `colors.ssh-keys = "yellow"` → ssh-keys entries render in yellow
+
+---
+
+## 11. Inline File Editing
+
+Status: `[x]`
+
+### Goal
+
+Edit file content directly inside the TUI without launching `$EDITOR`. A vim-lite inline editor covers small, surgical edits (rotating a key path, fixing a value) with a safe save flow.
+
+### Entry
+
+- Press `E` (shift) in view mode with file content loaded → enter inline edit mode.
+- Guards (status message, no mode change):
+  - No content loaded / read error → "Cannot edit: no content loaded — press 'r' to refresh"
+  - File not writable (permission bits) → "File is read-only (mode 0oNNN) — use external editor (e)"
+
+### Edit Mode Keys
+
+| Key | Action |
+|-----|--------|
+| `h/j/k/l`, arrows | Move cursor (line/char) |
+| `i` | Insert before cursor |
+| `a` | Insert after cursor |
+| `A` | Insert at end of line |
+| `0` / `$` | Line start / line end |
+| `Backspace` | Delete char before cursor (merges with previous line at start) |
+| `Delete` | Delete char under cursor (merges with next line at end) |
+| `x` | Delete char under cursor |
+| `Enter` | Split line at cursor |
+| `o` / `O` | New line below / above, enter insert |
+| `PgUp` / `PgDn` | Move cursor a page |
+| `s` | Save to disk and exit |
+| `Esc` | In insert mode: exit insert mode. In normal mode: if dirty, prompt `y` save / `n` discard / `Esc` keep editing; if clean, exit |
+| `q` | Same as `Esc` in normal mode (save prompt or exit). In insert mode, types a literal `q` |
+- In insert mode every printable key is text (vim-faithful); command keys like `i`, `a`, `s` are characters.
+
+- Insert mode shows `INSERT` in the status bar (green); normal shows `EDIT`.
+- Cursor position shown as `Ln N Col M`.
+- `Esc` on a clean buffer exits immediately.
+
+### Data
+
+- Edit buffer is an in-memory clone of `file_content` (lines + trailing-newline flag).
+- On save: write file, update `file_content` and `baseline_content` (diff view reflects pre-edit state), append `edit <path> inline` to history log.
+- On discard: reload file from disk, message "Changes discarded".
+- Save failure (permissions) → status error, stay in view mode, buffer kept in `file_content` (diff view `d` shows what would be written).
+
+### Acceptance
+
+- `E` → cursor visible on first line, status shows `EDIT` and `Ln 1 Col 1`
+- `i` → `INSERT`, typed chars appear at cursor
+- `s` → file on disk updated, status "Saved", diff view (`d`) shows no changes
+- `Esc` with unsaved changes → prompt; `n` → file unchanged on disk, content reloaded
+- `Esc` with no changes → exits immediately
+- Read-only file → `E` shows mode message, stays in view
+- Edit a `.toml` entry → syntax highlighting preserved in edit mode
+
+---
+
+## 12. Inline Annotations (Plannotator-style)
+
+Status: `[x]`
+
+### Goal
+
+Select a range of lines in the file viewer and attach a persistent comment — the "Herdr Annotate" effect: highlight the selected lines, open a small comment popover next to them, save the note. Gutter markers show annotated lines; jump and review notes without leaving the viewer.
+
+### Storage
+
+`~/.config/arioch/annotations.toml` (respects `--config`):
+[[annotations]]
+path = "~/.ssh/config"
+start = 12
+end = 14
+text = "Rotate this key quarterly"
+created = "2026-08-29T10:00:00Z"
+```
+
+- Line numbers are 1-based, inclusive.
+- Keyed by the entry's registered path string (gutter matches it against the entry, not the disk path).
+
+### Keys (view mode)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Move the line cursor (file switching stays on `j`/`k`) |
+| `v` | Start selection at the line cursor |
+| `j/k`, `↑/↓` (in selection) | Extend selection |
+| `c` (in selection) | Open comment popover |
+| `Esc` (in selection) | Cancel selection |
+| `g` | Jump to next annotation (wraps), scrolls to it |
+| `A` | View annotation at line cursor (read-only popover) |
+| `d` (in annotation popover) | Delete that annotation |
+
+### UI
+
+- Selected lines: full-line background highlight + `▌` gutter marker (like the video).
+- Popover: small bordered box anchored near the selection (right of center, clamped in bounds): title `Annotate lines X–Y`, single-line text input, `Enter:save  Esc:cancel`.
+- Annotation view popover: title `Annotation L X–Y`, wrapped text body, `Esc:close  d:delete`.
+- Gutter: `●` (yellow) on any line covered by an annotation, in view, edit, and selection modes.
+- Status bar in selection: `lines X–Y selected | c:comment  Esc:cancel`.
+
+### Data
+
+- Save appends the annotation, persists immediately, status "Annotated lines X–Y".
+- Delete removes it, persists, status "Annotation removed".
+- Audit: `annotate <path> lines=X-Y` / `unannotate <path> lines=X-Y` in history log.
+- Empty comment text → popover stays open.
+
+### Acceptance
+
+- `v` then `j j j` then `c` → 4 lines highlighted, popover appears
+- Type text + Enter → `annotations.toml` contains the range, status confirms
+- Re-open the file → `●` gutter markers on the annotated lines
+- `g` → scrolls to the annotation; `A` on that line → popover shows the text
+- `d` in popover → annotation removed from file, status confirms
+- `Esc` in selection → highlight cleared, back to view

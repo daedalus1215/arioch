@@ -8,7 +8,8 @@ Security file manager. View, manage, and map local security files from a single 
 - **Views** file content with syntax highlighting (TOML, JSON, YAML, INI, SSH config, PEM, shell, env)
 - **Maps** relationships between files as a navigable graph
 - **Scans** directories to discover security files you haven't registered yet
-- **Edits** via your `$EDITOR` — no custom edit code
+- **Edits** inline in the TUI (vim-style normal/insert modes) or via your `$EDITOR`
+- **Annotates** files with inline comments (plannotator-style): select a line range, attach a note, see gutter markers, jump between annotations
 - **Watches** files for changes and auto-refreshes
 - **Audits** every mutation to an append-only log
 - **Scriptable** — all operations available as non-interactive CLI subcommands
@@ -64,8 +65,12 @@ arioch --config /path/to/dir list
 | `s` | Scan for security files |
 | `/` | Search across all entries |
 | `a` | Add new entry (dialog) |
+| `E` | Inline edit (vim-style, in TUI) |
 | `e` | Open file in `$EDITOR` |
-| `d` | Delete selected entry |
+| `v` | Start annotation selection |
+| `g` (in view) | Jump to next annotation |
+| `d` | File diff view (baseline vs current) |
+| `x` | Delete selected entry
 | `r` | Force refresh file content |
 | `H` | Audit history (last 20 changes) |
 | `Space` | Toggle multi-select |
@@ -86,6 +91,19 @@ arioch --config /path/to/dir list
 | `r` | Re-layout |
 | `q` / `Esc` | Back to view |
 
+### Inline edit mode keys
+
+| Key | Action |
+|-----|--------|
+| `i` / `a` / `A` | Insert at cursor / after cursor / end of line |
+| `h` / `j` / `k` / `l` | Move cursor |
+| `0` / `^` | Start of line / first non-blank |
+| `$` | End of line |
+| `x` / `Backspace` | Delete char under / before cursor |
+| `o` / `O` | New line below / above |
+| `s` | Save and exit |
+| `Esc` | Exit insert mode; then save prompt / quit
+
 ## Configuration
 
 All files live in `~/.config/arioch/`:
@@ -95,6 +113,7 @@ All files live in `~/.config/arioch/`:
 | `config.toml` | Scan paths, patterns, depth, file size limit, refresh interval, editor, colors |
 | `index.toml` | Registered entries (path, category, tags, description, alias, related) |
 | `history.log` | Append-only audit log of all mutations |
+| `annotations.toml` | Inline file annotations (line ranges + comments)
 
 ### Example config.toml
 
@@ -131,7 +150,7 @@ related = ["id_ed25519"]
 ```
 arioch/
 ├── Cargo.toml
-├── SPECS.md          # feature specs (all 10 implemented)
+├── SPECS.md          # feature specs (all 12 implemented)
 ├── README.md
 └── src/
     ├── main.rs       # CLI subcommands + TUI entry point

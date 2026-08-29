@@ -1,4 +1,4 @@
-use crate::app::{App, Mode};
+use crate::app::{days_to_ymd, App, Mode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -55,6 +55,12 @@ pub fn render(f: &mut Frame, app: &App) {
         Mode::Suggestions => render_suggestions(f, main_chunk, app),
         Mode::History => render_history(f, main_chunk, app),
         Mode::Investigate => render_investigate(f, main_chunk, app),
+        Mode::Edit => render_edit(f, main_chunk, app),
+        Mode::Annotate => render_main(f, main_chunk, app),
+        Mode::AnnotView => {
+            render_main(f, main_chunk, app);
+            render_annot_view(f, app);
+        }
         _ => render_main(f, main_chunk, app),
     }
 
@@ -201,7 +207,11 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
         format!(" Search: {} ", &app.search_query)
     } else if let Some(idx) = app.selected_entry {
         if let Some(entry) = app.registry.get_entry(idx) {
-            format!(" {} ", entry.path)
+            if app.mode == Mode::Annotate {
+                format!(" ANNOTATE: {} ", entry.path)
+            } else {
+                format!(" {} ", entry.path)
+            }
         } else {
             " File View ".into()
         }
@@ -209,13 +219,18 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
         " File View ".into()
     };
 
+    let border_color = if app.mode == Mode::Annotate {
+        Color::Green
+    } else {
+        Color::Cyan
+    };
     let block = Block::default()
         .title(Span::styled(
             title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default().fg(border_color).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(border_color));
 
     if matches!(app.mode, Mode::Search) {
         let mut lines = Vec::new();
@@ -294,6 +309,10 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
 
     if let Some(idx) = app.selected_entry {
         if let Some(entry) = app.registry.get_entry(idx) {
+            if app.mode == Mode::Annotate {
+                render_annotate_content(f, area, app, entry, block);
+                return;
+            }
             let mut lines = Vec::new();
 
             lines.push(Line::from(Span::styled(
@@ -494,6 +513,265 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
         let paragraph = Paragraph::new(lines).block(block);
         f.render_widget(paragraph, area);
     }
+}
+
+fn render_edit(f: &mut Frame, area: Rect, app: &App) {
+    let edit = match &app.edit {
+        Some(e) => e,
+        None => return,
+    };
+
+    let title = if let Some(idx) = app.selected_entry {
+        if let Some(entry) = app.registry.get_entry(idx) {
+            format!(" EDIT: {} ", entry.path)
+        } else {
+            " EDIT ".into()
+        }
+    } else {
+        " EDIT ".into()
+    };
+
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+
+    let total = edit.lines.len();
+    let visible = (area.height as usize).saturating_sub(3).max(1);
+    let start = app.scroll_offset.min(total.saturating_sub(visible));
+
+    let file_type = if let Some(idx) = app.selected_entry {
+        if let Some(entry) = app.registry.get_entry(idx) {
+            crate::syntax::detect_type(
+                &entry.path,
+                edit.lines.first().map(|s| s.as_str()).unwrap_or(""),
+            )
+        } else {
+            crate::syntax::FileType::Plain
+        }
+    } else {
+        crate::syntax::FileType::Plain
+    };
+
+    let mut lines = Vec::new();
+    for (i, line) in edit.lines.iter().enumerate().skip(start).take(visible) {
+        let is_cursor = i == edit.cursor_line;
+        let gutter = if is_cursor { "▸" } else { " " };
+        let gutter_style = if is_cursor {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let mut spans = vec![Span::styled(format!(" {} ", gutter), gutter_style)];
+
+        let mut char_offset = 0usize;
+        for span in crate::syntax::highlight_line(line, file_type).spans {
+            let span_len = span.content.chars().count();
+            let span_start = char_offset;
+            char_offset += span_len;
+
+            if is_cursor && edit.cursor_col >= span_start && edit.cursor_col < span_start + span_len {
+                let pos = edit.cursor_col - span_start;
+                let chars: Vec<char> = span.content.chars().collect();
+                let before: String = chars[..pos].iter().collect();
+                let mid: String = chars[pos..pos + 1].iter().collect();
+                let after: String = chars[pos + 1..].iter().collect();
+
+                if !before.is_empty() {
+                    spans.push(Span::styled(
+                        before,
+                        span.style.patch(Style::default().bg(Color::DarkGray)),
+                    ));
+                }
+                spans.push(Span::styled(mid, span.style.add_modifier(Modifier::REVERSED)));
+                if !after.is_empty() {
+                    spans.push(Span::styled(
+                        after,
+                        span.style.patch(Style::default().bg(Color::DarkGray)),
+                    ));
+                }
+            } else {
+                let style = if is_cursor {
+                    span.style.patch(Style::default().bg(Color::DarkGray))
+                } else {
+                    span.style
+                };
+                spans.push(Span::styled(span.content, style));
+            }
+        }
+        if line.is_empty() && is_cursor {
+            spans.push(Span::styled(
+                " ",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let mode_str = if edit.inserting {
+        "INSERT"
+    } else if edit.dirty {
+        "MODIFIED"
+    } else {
+        "NORMAL"
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  [{}]  Ln {} Col {}  i:insert  a:append  x:del  0:line  s:save  Esc:quit",
+            mode_str,
+            edit.cursor_line + 1,
+            edit.cursor_col + 1
+        ),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
+}
+
+fn render_annotate_content(f: &mut Frame, area: Rect, app: &App, entry: &crate::registry::Entry, block: Block) {
+    let content = match &app.file_content {
+        Some(c) => c,
+        None => {
+            let lines = vec![Line::from(Span::styled(
+                "  (no content loaded — press 'r' to refresh)",
+                Style::default().fg(Color::DarkGray),
+            ))];
+            f.render_widget(Paragraph::new(lines).block(block), area);
+            return;
+        }
+    };
+
+    let total_lines = content.lines().count().max(1);
+    let visible = (area.height as usize).saturating_sub(12).max(1);
+    let start = app.scroll_offset.min(total_lines.saturating_sub(visible));
+
+    let file_type = crate::syntax::detect_type(
+        &entry.path,
+        content.lines().next().unwrap_or(""),
+    );
+
+    let mut has_ann = vec![false; total_lines];
+    let mut count = 0usize;
+    for a in app.annotations.iter().filter(|a| a.path == entry.path) {
+        count += 1;
+        for l in a.start.saturating_sub(1)..a.end.min(total_lines) {
+            has_ann[l] = true;
+        }
+    }
+
+    let sel_start = app.annot_anchor.min(app.annot_cursor);
+    let sel_end = app.annot_anchor.max(app.annot_cursor);
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  ({} lines, {} annotation(s), selecting {}-{})",
+            total_lines,
+            count,
+            sel_start + 1,
+            sel_end + 1
+        ),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    for (i, line) in content.lines().enumerate().skip(start).take(visible) {
+        let is_cursor = i == app.annot_cursor;
+        let is_selected = i >= sel_start && i <= sel_end;
+        let gutter = if is_cursor { "▸" } else if has_ann[i] { "*" } else { " " };
+        let gutter_style = if is_cursor {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if has_ann[i] {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let mut spans = vec![Span::styled(format!(" {} ", gutter), gutter_style)];
+        for span in crate::syntax::highlight_line(line, file_type).spans {
+            let style = if is_selected {
+                span.style.patch(Style::default().bg(Color::DarkGray))
+            } else {
+                span.style
+            };
+            spans.push(Span::styled(span.content, style));
+        }
+        if line.is_empty() && is_selected {
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(ref t) = app.annot_text {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  Comment: [{}]", t),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  j/k:extend  v:re-anchor  c:comment  g:next  A:view  Esc:cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}
+
+fn render_annot_view(f: &mut Frame, app: &App) {
+    let i = match app.annot_view {
+        Some(i) => i,
+        None => return,
+    };
+    let ann = match app.annotations.get(i) {
+        Some(a) => a,
+        None => return,
+    };
+
+    let area = f.area();
+    let w = 48u16.min(area.width.saturating_sub(4)).max(20);
+    let h = 7u16;
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Annotation ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  Lines {}-{}", ann.start, ann.end),
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            format!("  {}", truncate(&ann.text, (w as usize).saturating_sub(6))),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!("  created {}", ann.created),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  d:delete  Esc:close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(paragraph, rect);
 }
 
 fn render_map(f: &mut Frame, area: Rect, app: &App) {
@@ -913,6 +1191,9 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         Mode::Dialog => "DIALOG",
         Mode::History => "HISTORY",
         Mode::Investigate => "INVESTIGATE",
+        Mode::Edit => "EDIT",
+        Mode::Annotate => "ANNOTATE",
+        Mode::AnnotView => "NOTE",
     };
 
     // Bulk prompt takes priority
@@ -930,13 +1211,19 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let help = if !app.multi_selected.is_empty() {
+    let help = if app.mode == Mode::Edit {
+        "i:insert  a:append  x:del  0:line  s:save  Esc:quit".to_string()
+    } else if app.mode == Mode::Annotate {
+        "j/k:extend  v:re-anchor  c:comment  g:next  A:view  Esc:cancel".to_string()
+    } else if app.mode == Mode::AnnotView {
+        "d:delete  Esc:close".to_string()
+    } else if !app.multi_selected.is_empty() {
         format!(
             "{} selected | Space:toggle  t:tag  C:categorize  D:remove  Esc:clear",
             app.multi_selected.len()
         )
     } else {
-        "j/k:navigate  h/l:sidebar  m:map  s:scan  /:search  e:edit  d:delete  q:quit"
+        "j/k:nav  h/l:sidebar  m:map  s:scan  /:search  E:inline-edit  v:annotate  e:$EDITOR  x:rm  q:quit"
             .to_string()
     };
 
@@ -1095,7 +1382,7 @@ fn expand_path_for_check(path: &str) -> String {
 fn render_help(f: &mut Frame, _app: &App) {
     let area = f.area();
     let width = (area.width / 2).min(50).max(30);
-    let height = (area.height / 2).min(28).max(20);
+    let height = (area.height / 2).min(32).max(24);
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -1114,11 +1401,16 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from("  k / Up         prev entry"),
         Line::from("  h / Left       collapse sidebar"),
         Line::from("  l / Right      expand sidebar"),
+        Line::from("  + / -          line cursor (view)"),
         Line::from(""),
         Line::from(Span::styled("  Actions", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-        Line::from("  Enter          open file in $EDITOR"),
-        Line::from("  e              edit file"),
-        Line::from("  r              refresh / rescan"),
+        Line::from("  e              open in $EDITOR"),
+        Line::from("  E              inline edit (vim-like)"),
+        Line::from("  v              annotate selection"),
+        Line::from("  A              view annotation at line"),
+        Line::from("  g              next annotation"),
+        Line::from("  d              toggle diff view"),
+        Line::from("  r              refresh file"),
         Line::from("  a              add entry"),
         Line::from("  x              remove entry"),
         Line::from("  s              scan for files"),
@@ -1126,10 +1418,9 @@ fn render_help(f: &mut Frame, _app: &App) {
         Line::from(""),
         Line::from(Span::styled("  Views", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from("  m              relationship map"),
+        Line::from("  H              audit history"),
         Line::from("  i              investigate config keys"),
-        Line::from("  g              audit history"),
         Line::from("  /              search"),
-        Line::from("  t              toggle tag filter"),
         Line::from(""),
         Line::from(Span::styled("  Misc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from("  ?              toggle this help"),
@@ -1152,18 +1443,4 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
-}
-
-fn days_to_ymd(days: i64) -> (i64, i64, i64) {
-    // Simple civil-from-days algorithm (Howard Hinnant)
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m as i64, d as i64)
 }

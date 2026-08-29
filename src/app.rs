@@ -19,6 +19,21 @@ pub enum Mode {
     Dialog,
     History,
     Investigate,
+    Edit,
+    Annotate,
+    AnnotView,
+}
+
+/// Inline editor buffer for the currently selected file.
+#[derive(Debug, Clone)]
+pub struct EditState {
+    pub lines: Vec<String>,
+    pub cursor_line: usize,
+    pub cursor_col: usize,
+    pub inserting: bool,
+    pub dirty: bool,
+    pub trailing_newline: bool,
+    pub prompting_save: bool,
 }
 
 #[derive(Debug)]
@@ -67,6 +82,13 @@ pub struct App {
     pub investigate_selected: usize,
     pub investigate_scroll: usize,
     pub quit: bool,
+    pub edit: Option<EditState>,
+    pub view_line: usize,
+    pub annot_anchor: usize,
+    pub annot_cursor: usize,
+    pub annot_text: Option<String>,
+    pub annot_view: Option<usize>,
+    pub annotations: Vec<crate::annotations::Annotation>,
 }
 
 impl App {
@@ -113,6 +135,13 @@ impl App {
             investigate_selected: 0,
             investigate_scroll: 0,
             quit: false,
+            edit: None,
+            view_line: 0,
+            annot_anchor: 0,
+            annot_cursor: 0,
+            annot_text: None,
+            annot_view: None,
+            annotations: crate::annotations::AnnotationsFile::load(),
         }
     }
 
@@ -267,6 +296,13 @@ impl App {
         }
 
         match key.code {
+            // In edit insert mode, every key is text except Esc
+            _ if self.edit_inserting()
+                && !matches!(key.code, crossterm::event::KeyCode::Esc) =>
+            {
+                self.handle_edit(key);
+                return;
+            }
             crossterm::event::KeyCode::Char('?') => {
                 self.show_help = !self.show_help;
                 return;
@@ -285,6 +321,29 @@ impl App {
                     self.mode = Mode::View;
                 } else if self.mode == Mode::Investigate {
                     self.mode = Mode::View;
+                } else if self.mode == Mode::Edit {
+                    if self.edit.as_ref().map(|e| e.prompting_save).unwrap_or(false) {
+                        if let Some(e) = &mut self.edit {
+                            e.prompting_save = false;
+                        }
+                    } else if self.edit_inserting() {
+                        if let Some(e) = &mut self.edit {
+                            e.inserting = false;
+                        }
+                    } else if self.edit.as_ref().map(|e| e.dirty).unwrap_or(false) {
+                        if let Some(e) = &mut self.edit {
+                            e.prompting_save = true;
+                        }
+                        self.set_message("Save changes? y:save  n:discard  Esc:keep editing");
+                    } else {
+                        self.edit = None;
+                        self.mode = Mode::View;
+                    }
+                } else if self.mode == Mode::Annotate {
+                    self.annot_escape();
+                } else if self.mode == Mode::AnnotView {
+                    self.annot_view = None;
+                    self.mode = Mode::View;
                 } else {
                     self.quit = true;
                 }
@@ -295,6 +354,9 @@ impl App {
                     Mode::Suggestions => self.handle_suggestions(key),
                     Mode::Map => self.handle_map(key),
                     Mode::Investigate => self.handle_investigate(key),
+                    Mode::Edit => self.handle_edit(key),
+                    Mode::Annotate => self.handle_annotate(key),
+                    Mode::AnnotView => self.handle_annot_view(key),
                     _ => self.handle_normal(key),
                 }
             }
@@ -406,6 +468,24 @@ impl App {
             }
             crossterm::event::KeyCode::Char('e') => {
                 self.open_editor();
+            }
+            crossterm::event::KeyCode::Char('E') => {
+                self.enter_edit();
+            }
+            crossterm::event::KeyCode::Char('v') => {
+                self.start_annotate();
+            }
+            crossterm::event::KeyCode::Char('g') => {
+                self.next_annotation();
+            }
+            crossterm::event::KeyCode::Char('A') => {
+                self.view_annotation();
+            }
+            crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('=') => {
+                self.move_view_line(1);
+            }
+            crossterm::event::KeyCode::Char('-') => {
+                self.move_view_line(-1);
             }
             crossterm::event::KeyCode::Char('d') => {
                 self.show_diff = !self.show_diff;
@@ -784,6 +864,466 @@ impl App {
             _ => {}
         }
     }
+    fn edit_inserting(&self) -> bool {
+        self.edit.as_ref().map(|e| e.inserting).unwrap_or(false)
+    }
+
+
+    // ── Inline editing ────────────────────────────────────────────────────
+
+    fn enter_edit(&mut self) {
+        let idx = match self.selected_entry {
+            Some(i) => i,
+            None => {
+                self.set_message("No entry selected");
+                return;
+            }
+        };
+        let entry = match self.registry.get_entry(idx) {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let content = match &self.file_content {
+            Some(c) => c.clone(),
+            None => {
+                self.set_message("Cannot edit: no content loaded — press 'r' to refresh");
+                return;
+            }
+        };
+        let path = expand_path(&entry.path);
+        #[cfg(unix)]
+        if let Ok(meta) = std::fs::metadata(&path) {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            if mode & 0o200 == 0 {
+                self.set_message(&format!(
+                    "File is read-only (mode {:o}) — use external editor (e)",
+                    mode & 0o777
+                ));
+                return;
+            }
+        }
+
+        let trailing_newline = !content.is_empty() && content.ends_with('\n');
+        let lines: Vec<String> = if content.is_empty() {
+            vec![String::new()]
+        } else {
+            content.lines().map(String::from).collect()
+        };
+        self.mode = Mode::Edit;
+        self.edit = Some(EditState {
+            lines,
+            cursor_line: 0,
+            cursor_col: 0,
+            inserting: false,
+            dirty: false,
+            trailing_newline,
+            prompting_save: false,
+        });
+        self.set_message("Edit mode — s:save  Esc:quit");
+    }
+
+    fn handle_edit(&mut self, key: KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        // Save-prompt state takes precedence
+        if self.edit.as_ref().map(|e| e.prompting_save).unwrap_or(false) {
+            match key.code {
+                KeyCode::Char('y') => self.save_edit(),
+                KeyCode::Char('n') => self.discard_edit(),
+                _ => {}
+            }
+            return;
+        }
+
+        // Keys that transition out of edit mode
+        match key.code {
+            KeyCode::Char('s') => {
+                self.save_edit();
+                return;
+            }
+            _ => {}
+        }
+
+        let edit = match self.edit.as_mut() {
+            Some(e) => e,
+            None => {
+                self.mode = Mode::View;
+                return;
+            }
+        };
+
+        let line_len = edit
+            .lines
+            .get(edit.cursor_line)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
+
+        // Insert mode: all characters are text
+        if edit.inserting {
+            match key.code {
+                KeyCode::Char(c) => edit_insert_char(edit, c),
+                KeyCode::Backspace => edit_backspace(edit),
+                KeyCode::Enter => edit_enter(edit),
+                _ => {}
+            }
+            return;
+        }
+
+        // Normal-mode commands
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                if edit.cursor_line + 1 < edit.lines.len() {
+                    edit.cursor_line += 1;
+                }
+                edit.cursor_col = edit
+                    .cursor_col
+                    .min(edit.lines[edit.cursor_line].chars().count());
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                edit.cursor_line = edit.cursor_line.saturating_sub(1);
+                edit.cursor_col = edit
+                    .cursor_col
+                    .min(edit.lines[edit.cursor_line].chars().count());
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                edit.cursor_col = (edit.cursor_col + 1).min(line_len);
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                edit.cursor_col = edit.cursor_col.saturating_sub(1);
+            }
+            KeyCode::Char('i') => {
+                edit.inserting = true;
+            }
+            KeyCode::Char('a') => {
+                if edit.cursor_col < line_len {
+                    edit.cursor_col += 1;
+                } else if edit.cursor_line + 1 < edit.lines.len() {
+                    edit.cursor_line += 1;
+                    edit.cursor_col = 0;
+                }
+                edit.inserting = true;
+            }
+            KeyCode::Char('A') => {
+                edit.cursor_col = line_len;
+                edit.inserting = true;
+            }
+            KeyCode::Char('0') => {
+                edit.cursor_col = 0;
+            }
+            KeyCode::Char('$') => {
+                edit.cursor_col = line_len;
+            }
+            KeyCode::Char('x') | KeyCode::Delete => {
+                edit_delete_char(edit);
+            }
+            KeyCode::Char('o') => {
+                edit.lines.insert(edit.cursor_line + 1, String::new());
+                edit.cursor_line += 1;
+                edit.cursor_col = 0;
+                edit.inserting = true;
+                edit.dirty = true;
+            }
+            KeyCode::Char('O') => {
+                edit.lines.insert(edit.cursor_line, String::new());
+                edit.cursor_col = 0;
+                edit.inserting = true;
+                edit.dirty = true;
+            }
+            KeyCode::PageDown => {
+                edit.cursor_line = (edit.cursor_line + 20)
+                    .min(edit.lines.len().saturating_sub(1));
+                edit.cursor_col = edit
+                    .cursor_col
+                    .min(edit.lines[edit.cursor_line].chars().count());
+            }
+            KeyCode::PageUp => {
+                edit.cursor_line = edit.cursor_line.saturating_sub(20);
+                edit.cursor_col = edit
+                    .cursor_col
+                    .min(edit.lines[edit.cursor_line].chars().count());
+            }
+            _ => {}
+        }
+    }
+
+    fn save_edit(&mut self) {
+        let snapshot = match self.edit.clone() {
+            Some(e) => e,
+            None => {
+                self.mode = Mode::View;
+                return;
+            }
+        };
+        let idx = match self.selected_entry {
+            Some(i) => i,
+            None => {
+                self.mode = Mode::View;
+                return;
+            }
+        };
+        let entry = match self.registry.get_entry(idx) {
+            Some(e) => e.clone(),
+            None => {
+                self.mode = Mode::View;
+                return;
+            }
+        };
+
+        let mut content = snapshot.lines.join("\n");
+        if snapshot.trailing_newline {
+            content.push('\n');
+        }
+
+        let path = expand_path(&entry.path);
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            if original == content {
+                self.file_content = Some(content);
+                self.baseline_content = Some(self.file_content.clone().unwrap_or_default());
+                self.baseline_entry = Some(idx);
+                self.edit = None;
+                self.mode = Mode::View;
+                self.set_message("No changes");
+                return;
+            }
+        }
+
+        match std::fs::write(&path, &content) {
+            Ok(()) => {
+                self.file_content = Some(content.clone());
+                self.baseline_content = Some(content.clone());
+                self.baseline_entry = Some(idx);
+                self.last_mtime = None;
+                self.edit = None;
+                self.mode = Mode::View;
+                self.log_action("edit", &entry.path, "inline");
+                self.set_message(&format!("Saved: {}", entry.path));
+            }
+            Err(e) => {
+                self.edit = Some(snapshot);
+                self.set_message(&format!("Save failed: {}", e));
+            }
+        }
+    }
+
+    fn discard_edit(&mut self) {
+        self.edit = None;
+        self.mode = Mode::View;
+        self.refresh_content();
+        self.set_message("Changes discarded");
+    }
+
+    // ── Inline annotations ────────────────────────────────────────────────
+
+    fn start_annotate(&mut self) {
+        if self.file_content.is_none() {
+            self.set_message("No content to annotate — press 'r' to refresh");
+            return;
+        }
+        self.mode = Mode::Annotate;
+        self.annot_anchor = self.view_line;
+        self.annot_cursor = self.view_line;
+        self.annot_text = None;
+    }
+
+    fn handle_annotate(&mut self, key: KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        // Comment popover open: capture text
+        if self.annot_text.is_some() {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some(t) = self.annot_text.as_mut() {
+                        t.push(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(t) = self.annot_text.as_mut() {
+                        t.pop();
+                    }
+                }
+                KeyCode::Enter => self.save_annotation(),
+                _ => {}
+            }
+            return;
+        }
+
+        let total = self
+            .file_content
+            .as_ref()
+            .map(|c| c.lines().count().max(1))
+            .unwrap_or(1);
+
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.annot_cursor = (self.annot_cursor + 1).min(total - 1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.annot_cursor = self.annot_cursor.saturating_sub(1);
+            }
+            KeyCode::Char('v') => {
+                self.annot_anchor = self.annot_cursor;
+            }
+            KeyCode::Char('c') => {
+                self.annot_text = Some(String::new());
+            }
+            KeyCode::Char('g') => {
+                self.next_annotation();
+            }
+            KeyCode::Char('A') => {
+                self.view_annotation();
+            }
+            _ => {}
+        }
+    }
+
+    fn save_annotation(&mut self) {
+        let text = match self.annot_text.as_mut() {
+            Some(t) => t.trim().to_string(),
+            None => return,
+        };
+        if text.is_empty() {
+            self.set_message("Comment text is required");
+            return;
+        }
+        let idx = match self.selected_entry {
+            Some(i) => i,
+            None => {
+                self.mode = Mode::View;
+                return;
+            }
+        };
+        let entry = match self.registry.get_entry(idx) {
+            Some(e) => e.clone(),
+            None => {
+                self.mode = Mode::View;
+                return;
+            }
+        };
+        let start = self.annot_anchor.min(self.annot_cursor) + 1;
+        let end = self.annot_anchor.max(self.annot_cursor) + 1;
+        self.annotations.push(crate::annotations::Annotation {
+            path: entry.path.clone(),
+            start,
+            end,
+            text,
+            created: iso_now(),
+        });
+        match crate::annotations::AnnotationsFile::save(&self.annotations) {
+            Ok(()) => {
+                self.mode = Mode::View;
+                self.annot_text = None;
+                self.log_action("annotate", &entry.path, &format!("lines={}-{}", start, end));
+                self.set_message(&format!("Annotated lines {}-{}", start, end));
+            }
+            Err(e) => {
+                self.annotations.pop();
+                self.set_message(&format!("Save failed: {}", e));
+            }
+        }
+    }
+
+    fn annot_escape(&mut self) {
+        if self.annot_text.is_some() {
+            self.annot_text = None;
+        } else {
+            self.mode = Mode::View;
+            self.set_message("Selection cancelled");
+        }
+    }
+
+    fn next_annotation(&mut self) {
+        let idx = match self.selected_entry {
+            Some(i) => i,
+            None => return,
+        };
+        let entry = match self.registry.get_entry(idx) {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let mut idxs: Vec<usize> = (0..self.annotations.len())
+            .filter(|&i| self.annotations[i].path == entry.path)
+            .collect();
+        if idxs.is_empty() {
+            self.set_message("No annotations for this file");
+            return;
+        }
+        idxs.sort_by_key(|&i| self.annotations[i].start);
+        let current_line = self.view_line + 1;
+        let next = idxs
+            .iter()
+            .copied()
+            .find(|&i| self.annotations[i].start > current_line)
+            .or_else(|| idxs.first().copied());
+        if let Some(i) = next {
+            self.view_line = self.annotations[i].start.saturating_sub(1);
+            self.scroll_offset = self.view_line;
+            self.annot_view = Some(i);
+            self.mode = Mode::AnnotView;
+        }
+    }
+
+    fn view_annotation(&mut self) {
+        let idx = match self.selected_entry {
+            Some(i) => i,
+            None => return,
+        };
+        let entry = match self.registry.get_entry(idx) {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let line = self.view_line + 1;
+        match (0..self.annotations.len()).find(|&i| {
+            self.annotations[i].path == entry.path && self.annotations[i].covers(line)
+        }) {
+            Some(i) => {
+                self.annot_view = Some(i);
+                self.mode = Mode::AnnotView;
+            }
+            None => {
+                self.set_message(&format!("No annotation at line {}", line));
+            }
+        }
+    }
+
+    fn handle_annot_view(&mut self, key: KeyEvent) {
+        if key.code == crossterm::event::KeyCode::Char('d') {
+            if let Some(i) = self.annot_view {
+                let ann = self.annotations[i].clone();
+                self.annotations.remove(i);
+                match crate::annotations::AnnotationsFile::save(&self.annotations) {
+                    Ok(()) => {
+                        self.log_action(
+                            "unannotate",
+                            &ann.path,
+                            &format!("lines={}-{}", ann.start, ann.end),
+                        );
+                        self.set_message(&format!(
+                            "Annotation removed (lines {}-{})",
+                            ann.start, ann.end
+                        ));
+                    }
+                    Err(e) => {
+                        self.annotations.insert(i, ann);
+                        self.set_message(&format!("Save failed: {}", e));
+                    }
+                }
+            }
+            self.annot_view = None;
+            self.mode = Mode::View;
+        }
+    }
+
+    fn move_view_line(&mut self, delta: isize) {
+        let total = self
+            .file_content
+            .as_ref()
+            .map(|c| c.lines().count().max(1))
+            .unwrap_or(1);
+        let cur = self.view_line as isize;
+        let next = (cur + delta).clamp(0, (total - 1) as isize);
+        self.view_line = next as usize;
+    }
 
     /// Get entry indices in visual display order (grouped by category, alphabetical).
     fn visual_order(&self) -> Vec<usize> {
@@ -853,6 +1393,7 @@ impl App {
         self.file_content = None;
         self.file_error = None;
         self.scroll_offset = 0;
+        self.view_line = 0;
 
         if let Some(idx) = self.selected_entry {
             if let Some(entry) = self.registry.get_entry(idx) {
@@ -1305,6 +1846,98 @@ impl App {
         }
         Event::Tick
     }
+}
+
+
+/// Insert a character at the cursor position.
+fn edit_insert_char(edit: &mut EditState, c: char) {
+    let line = edit.lines[edit.cursor_line].clone();
+    let mut chars: Vec<char> = line.chars().collect();
+    chars.insert(edit.cursor_col, c);
+    edit.lines[edit.cursor_line] = chars.into_iter().collect();
+    edit.cursor_col += 1;
+    edit.dirty = true;
+}
+/// Delete the char under the cursor (or merge with the next line at end-of-line).
+fn edit_delete_char(edit: &mut EditState) {
+    let line = edit.lines[edit.cursor_line].clone();
+    let mut chars: Vec<char> = line.chars().collect();
+    if edit.cursor_col < chars.len() {
+        chars.remove(edit.cursor_col);
+        edit.lines[edit.cursor_line] = chars.into_iter().collect();
+    } else if edit.cursor_line + 1 < edit.lines.len() {
+        let next = edit.lines[edit.cursor_line + 1].clone();
+        edit.lines[edit.cursor_line].push_str(&next);
+        edit.lines.remove(edit.cursor_line + 1);
+    }
+    edit.dirty = true;
+}
+
+/// Delete the char before the cursor (or merge with the previous line at start-of-line).
+fn edit_backspace(edit: &mut EditState) {
+    if edit.cursor_col > 0 {
+        let line = edit.lines[edit.cursor_line].clone();
+        let mut chars: Vec<char> = line.chars().collect();
+        chars.remove(edit.cursor_col - 1);
+        edit.lines[edit.cursor_line] = chars.into_iter().collect();
+        edit.cursor_col -= 1;
+    } else if edit.cursor_line > 0 {
+        let current = edit.lines[edit.cursor_line].clone();
+        let prev_len = edit.lines[edit.cursor_line - 1].chars().count();
+        edit.lines[edit.cursor_line - 1].push_str(&current);
+        edit.lines.remove(edit.cursor_line);
+        edit.cursor_line -= 1;
+        edit.cursor_col = prev_len;
+    }
+    edit.dirty = true;
+}
+
+/// Split the current line at the cursor, moving the remainder onto a new line below.
+fn edit_enter(edit: &mut EditState) {
+    let line = edit.lines[edit.cursor_line].clone();
+    let chars: Vec<char> = line.chars().collect();
+    let before: String = chars[..edit.cursor_col].iter().collect();
+    let after: String = chars[edit.cursor_col..].iter().collect();
+    edit.lines[edit.cursor_line] = before;
+    edit.lines.insert(edit.cursor_line + 1, after);
+    edit.cursor_line += 1;
+    edit.cursor_col = 0;
+    edit.dirty = true;
+}
+
+/// Convert days since UNIX epoch to (year, month, day).
+/// Civil-from-days algorithm (Howard Hinnant).
+pub(crate) fn days_to_ymd(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as i64, d as i64)
+}
+
+/// ISO-8601 UTC timestamp for annotation records.
+fn iso_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| {
+            let secs = d.as_secs() as i64;
+            let (year, month, day) = days_to_ymd(secs / 86400);
+            format!(
+                "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                year,
+                month,
+                day,
+                (secs % 86400) / 3600,
+                (secs % 3600) / 60,
+                secs % 60
+            )
+        })
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn guess_category(path: &str) -> String {
