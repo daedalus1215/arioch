@@ -22,7 +22,7 @@ pub struct DetectedKey {
 }
 
 /// A persistent inline comment attached to a line range of a registered file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Annotation {
     /// Registered entry path (as stored in index.toml, may contain `~`).
     pub path: String,
@@ -41,4 +41,13 @@ impl Annotation {
     pub fn covers(&self, line: usize) -> bool {
         line >= self.start && line <= self.end
     }
+}
+
+/// File metadata as observed through the `Filesystem` port.
+#[derive(Debug, Clone)]
+pub struct FileMeta {
+    pub len: u64,
+    pub modified: std::time::SystemTime,
+    /// Unix permission bits (full `permissions().mode()`; 0 on non-unix).
+    pub mode: u32,
 }

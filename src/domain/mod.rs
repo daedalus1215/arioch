@@ -7,5 +7,6 @@
 
 pub mod entity;
 pub mod knowledge;
+pub mod ports;
 pub mod rules;
 pub mod value;

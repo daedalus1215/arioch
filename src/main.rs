@@ -2,6 +2,7 @@ mod app;
 mod annotations;
 mod config;
 mod domain;
+mod infra;
 mod knowledge;
 mod registry;
 mod syntax;
