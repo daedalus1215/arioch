@@ -1,6 +1,5 @@
 mod app;
 mod application;
-mod annotations;
 mod config;
 mod domain;
 mod infra;
@@ -80,23 +79,23 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Apply --config override before any loading
-    if let Some(ref config_path) = cli.config {
-        let expanded = shellexpand::tilde(config_path);
-        config::set_config_override(std::path::PathBuf::from(expanded.into_owned()));
-    }
+    // Resolve --config once. The registry index and annotations honor it;
+    // Config and the audit log always use the raw config dir (today's behavior).
+    let active_dir = match &cli.config {
+        Some(path) => shellexpand::tilde(path).into_owned().into(),
+        None => config::Config::config_dir(),
+    };
 
     // No subcommand → launch TUI
     if cli.command.is_none() {
         setup_terminal()?;
-        let result = run_tui();
+        let result = run_tui(&active_dir);
         restore_terminal()?;
         return result;
     }
 
     // CLI subcommand → operate on the index through the store port
-    let config_dir = config::active_config_dir();
-    let store = infra::index_store::TomlIndex::new(&config_dir);
+    let store = infra::index_store::TomlIndex::new(&active_dir);
     let mut entries = store.load()?;
     match cli.command.unwrap() {
         Command::List => application::cli::cmd_list(&entries, cli.json),
@@ -136,24 +135,23 @@ fn main() -> anyhow::Result<()> {
 
 // ─── TUI (no subcommand) ───────────────────────────────────────────────────
 
-fn run_tui() -> anyhow::Result<()> {
+fn run_tui(active_dir: &std::path::Path) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let config = config::Config::load();
     // audit log watches the raw config dir (today's behavior); registry and
     // annotations honor the --config override
     let audit_dir = config::Config::config_dir();
-    let active_dir = config::active_config_dir();
     let ports = app::AppPorts {
         fs: Box::new(infra::fs::RealFs),
         editor: Box::new(infra::process::ShellEditor::new(config.editor())),
         clipboard: Box::new(infra::process::SystemClipboard),
         audit: Box::new(infra::audit_log::FileAuditLog::new(&audit_dir)),
-        registry_store: Box::new(infra::index_store::TomlIndex::new(&active_dir)),
-        annotation_store: Box::new(infra::annotations_store::TomlAnnotations::new(&active_dir)),
+        registry_store: Box::new(infra::index_store::TomlIndex::new(active_dir)),
+        annotation_store: Box::new(infra::annotations_store::TomlAnnotations::new(active_dir)),
     };
     let entries = ports.registry_store.load().unwrap_or_default();
-    let mut app = App::new(config, entries, ports);
+    let mut app = App::new(config, entries, active_dir.to_path_buf(), ports);
 
     loop {
         terminal.draw(|f| ui::render(f, &app))?;

@@ -99,7 +99,8 @@ pub struct App {
     pub annot_cursor: usize,
     pub annot_text: Option<String>,
     pub annot_view: Option<usize>,
-    pub annotations: Vec<crate::annotations::Annotation>,
+    pub annotations: Vec<crate::domain::value::Annotation>,
+    pub active_dir: PathBuf,
 }
 
 
@@ -113,7 +114,7 @@ pub struct AppPorts {
     pub annotation_store: Box<dyn AnnotationStore>,
 }
 impl App {
-    pub fn new(config: Config, entries: Vec<Entry>, ports: AppPorts) -> Self {
+    pub fn new(config: Config, entries: Vec<Entry>, active_dir: PathBuf, ports: AppPorts) -> Self {
         let selected = if entries.is_empty() {
             None
         } else {
@@ -124,6 +125,7 @@ impl App {
             config,
             entries,
             suggestions: Vec::new(),
+            active_dir,
             fs: ports.fs,
             editor: ports.editor,
             clipboard: ports.clipboard,
@@ -781,7 +783,7 @@ impl App {
         if let Some(idx) = self.selected_entry {
         if let Some(entry) = self.entries.get(idx) {
                 if let Some(ref content) = self.file_content {
-                    let kb = crate::knowledge::KnowledgeBase::load();
+                    let kb = crate::knowledge::KnowledgeBase::load(&self.active_dir);
                     let file_type = match crate::syntax::detect_type(&entry.path, content.lines().next().unwrap_or("")) {
                         crate::syntax::FileType::Ssh => "ssh",
                         crate::syntax::FileType::Ini => "ini",
@@ -1178,14 +1180,14 @@ impl App {
         };
         let start = self.annot_anchor.min(self.annot_cursor) + 1;
         let end = self.annot_anchor.max(self.annot_cursor) + 1;
-        self.annotations.push(crate::annotations::Annotation {
+        self.annotations.push(crate::domain::value::Annotation {
             path: entry.path.clone(),
             start,
             end,
             text,
             created: crate::domain::rules::iso_now(),
         });
-        match crate::annotations::AnnotationsFile::save(&self.annotations) {
+        match self.annotation_store.save(&self.annotations) {
             Ok(()) => {
                 self.mode = Mode::View;
                 self.annot_text = None;
@@ -1267,7 +1269,7 @@ impl App {
             if let Some(i) = self.annot_view {
                 let ann = self.annotations[i].clone();
                 self.annotations.remove(i);
-                match crate::annotations::AnnotationsFile::save(&self.annotations) {
+                match self.annotation_store.save(&self.annotations) {
                     Ok(()) => {
                         self.log_action(
                             "unannotate",

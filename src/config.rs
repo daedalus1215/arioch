@@ -2,25 +2,6 @@ use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 
-/// Global override for config directory (set via --config flag).
-static CONFIG_OVERRIDE: std::sync::LazyLock<parking_lot::Mutex<Option<PathBuf>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
-
-/// Set a custom config directory. All config/index paths will be resolved under this.
-pub fn set_config_override(path: PathBuf) {
-    let mut guard = CONFIG_OVERRIDE.lock();
-    *guard = Some(path);
-}
-
-/// Get the active config directory (override or default).
-pub fn active_config_dir() -> PathBuf {
-    let guard = CONFIG_OVERRIDE.lock();
-    if let Some(ref p) = *guard {
-        p.clone()
-    } else {
-        Config::config_dir()
-    }
-}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {

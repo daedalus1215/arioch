@@ -6,7 +6,7 @@
 
 pub use crate::domain::knowledge::KnowledgeEntry;
 pub use crate::domain::value::{Danger, DetectedKey};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The knowledge base — built-in + user entries.
 pub struct KnowledgeBase {
@@ -14,10 +14,10 @@ pub struct KnowledgeBase {
 }
 
 impl KnowledgeBase {
-    pub fn load() -> Self {
+    pub fn load(config_dir: &Path) -> Self {
         let mut entries = crate::domain::knowledge::builtin_entries();
         // Load user knowledge file (overrides/augments built-in)
-        let user_path = user_knowledge_path();
+        let user_path = user_knowledge_path(config_dir);
         if user_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&user_path) {
                 if let Ok(user_entries) = parse_user_knowledge(&content) {
@@ -41,8 +41,8 @@ impl KnowledgeBase {
     }
 }
 
-fn user_knowledge_path() -> PathBuf {
-    let mut p = crate::config::active_config_dir();
+fn user_knowledge_path(config_dir: &Path) -> PathBuf {
+    let mut p = config_dir.to_path_buf();
     p.push("arioch");
     p.push("knowledge.toml");
     p
