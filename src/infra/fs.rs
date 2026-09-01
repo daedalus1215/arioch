@@ -33,14 +33,6 @@ impl Filesystem for RealFs {
         })
     }
 
-    fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(path)
-    }
-
-    fn exists(&self, path: &Path) -> bool {
-        path.exists()
-    }
-
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
         let entries = std::fs::read_dir(path)?;
         Ok(entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())

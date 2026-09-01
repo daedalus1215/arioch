@@ -60,14 +60,6 @@ impl Filesystem for MemFs {
         }
     }
 
-    fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn exists(&self, path: &Path) -> bool {
-        self.files.lock().contains_key(&path.to_path_buf())
-    }
-
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let files = self.files.lock();
         let prefix = path.to_path_buf();
@@ -174,8 +166,6 @@ mod tests {
         let fs = MemFs::default();
         fs.write(Path::new("/a/b"), "hello").unwrap();
         assert_eq!(fs.read_to_string(Path::new("/a/b")).unwrap(), "hello");
-        assert!(fs.exists(Path::new("/a/b")));
-        assert!(!fs.exists(Path::new("/a/c")));
         assert!(fs.read_to_string(Path::new("/missing")).is_err());
         assert_eq!(fs.metadata(Path::new("/a/b")).unwrap().len, 5);
     }

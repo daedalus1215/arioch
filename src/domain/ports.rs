@@ -12,8 +12,6 @@ pub trait Filesystem: Send + Sync {
     fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     fn write(&self, path: &Path, contents: &str) -> std::io::Result<()>;
     fn metadata(&self, path: &Path) -> std::io::Result<FileMeta>;
-    fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
-    fn exists(&self, path: &Path) -> bool;
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>>;
     /// Lstat-style check: true when `path` itself is a symlink (the
     /// followed `metadata()` cannot distinguish a symlinked dir from a

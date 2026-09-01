@@ -143,12 +143,6 @@ mod tests {
                 None => Err(io::ErrorKind::NotFound.into()),
             }
         }
-        fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
-            Ok(())
-        }
-        fn exists(&self, path: &Path) -> bool {
-            self.kinds.contains_key(path)
-        }
         fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
             let prefix = path.to_path_buf();
             let depth = prefix.components().count();
