@@ -1371,9 +1371,10 @@ impl App {
         }
         if let Some(idx) = self.selected_entry {
             if let Some(pos) = order.iter().position(|&o| o == idx) {
-                let prev = if pos > 0 { pos - 1 } else { order.len() - 1 };
-                self.selected_entry = Some(order[prev]);
-                self.refresh_content();
+                if pos > 0 {
+                    self.selected_entry = Some(order[pos - 1]);
+                    self.refresh_content();
+                }
             }
         }
     }
@@ -2007,4 +2008,113 @@ fn edit_enter(edit: &mut EditState) {
     edit.cursor_line += 1;
     edit.cursor_col = 0;
     edit.dirty = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infra::mem::{
+        MemAnnotationStore, MemAuditLog, MemFs, MemRegistryStore, NoopEditor, VecClipboard,
+    };
+
+    fn entry(path: &str, category: &str) -> Entry {
+        Entry {
+            path: path.into(),
+            category: category.into(),
+            tags: Vec::new(),
+            description: String::new(),
+            alias: None,
+            related: Vec::new(),
+        }
+    }
+
+    /// Hermetic App for unit tests: in-memory ports, no disk access.
+    fn test_app(entries: Vec<Entry>) -> App {
+        App {
+            config: Config::default(),
+            entries,
+            suggestions: Vec::new(),
+            fs: Box::new(MemFs::default()),
+            editor: Box::new(NoopEditor),
+            clipboard: Box::new(VecClipboard::default()),
+            audit: Box::new(MemAuditLog::default()),
+            registry_store: Box::new(MemRegistryStore::default()),
+            annotation_store: Box::new(MemAnnotationStore::default()),
+            selected_entry: None,
+            selected_category: None,
+            mode: Mode::View,
+            sidebar_expanded: true,
+            sidebar_width: 35,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            scroll_offset: 0,
+            message: None,
+            show_help: false,
+            file_content: None,
+            baseline_content: None,
+            baseline_entry: None,
+            show_diff: false,
+            file_error: None,
+            dialog: None,
+            suggestion_selected: 0,
+            suggestion_scroll: 0,
+            suggestion_filter: String::new(),
+            suggestion_accepted: 0,
+            multi_selected: Vec::new(),
+            bulk_prompt: None,
+            bulk_input: String::new(),
+            last_mtime: None,
+            last_index_mtime: None,
+            map_zoom: 0,
+            map_scroll: 0,
+            map_selected: None,
+            investigate_keys: Vec::new(),
+            investigate_selected: 0,
+            investigate_scroll: 0,
+            quit: false,
+            edit: None,
+            view_line: 0,
+            annot_anchor: 0,
+            annot_cursor: 0,
+            annot_text: None,
+            annot_view: None,
+            annotations: Vec::new(),
+            active_dir: PathBuf::from("."),
+        }
+    }
+
+    /// Regression (user report, 2026-09-01): sidebar navigation must be a
+    /// hard wall at both ends. Previously `k` at the top wrapped to the
+    /// last entry while `j` at the bottom stayed put.
+    #[test]
+    fn sidebar_nav_is_a_hard_wall_at_both_ends() {
+        let mut app = test_app(vec![
+            entry("/a/one.toml", "secrets"),
+            entry("/a/two.toml", "secrets"),
+            entry("/a/three.toml", "secrets"),
+        ]);
+
+        app.selected_entry = Some(0);
+        app.select_prev();
+        assert_eq!(app.selected_entry, Some(0), "k at the top must stay put");
+
+        app.selected_entry = Some(2);
+        app.select_next();
+        assert_eq!(app.selected_entry, Some(2), "j at the bottom must stay put");
+    }
+
+    #[test]
+    fn sidebar_nav_moves_between_entries() {
+        let mut app = test_app(vec![
+            entry("/a/one.toml", "secrets"),
+            entry("/a/two.toml", "secrets"),
+        ]);
+
+        app.selected_entry = Some(0);
+        app.select_next();
+        assert_eq!(app.selected_entry, Some(1));
+
+        app.select_prev();
+        assert_eq!(app.selected_entry, Some(0));
+    }
 }
