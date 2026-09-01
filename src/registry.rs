@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub path: String,
     #[serde(default)]
@@ -326,4 +326,127 @@ fn walkdir_simple_depth(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
     }
     walk(dir, &mut result, 0, max_depth);
     result
+}
+
+// ─── Characterization tests (Phase 0) ──────────────────────────────────────
+// Pin current behavior of the registry business logic + TOML round-trip
+// before it splits into domain rules/use-cases and an infra store.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str) -> Entry {
+        Entry {
+            path: path.into(),
+            category: String::new(),
+            tags: Vec::new(),
+            description: String::new(),
+            alias: None,
+            related: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn is_excluded_is_bare_string_prefix_match() {
+        let reg = Registry::empty();
+        let excludes = vec!["/etc/ssl".to_string(), "/home/u/.config/git".to_string()];
+        assert!(reg.is_excluded(Path::new("/etc/ssl/certs/x"), &excludes));
+        assert!(!reg.is_excluded(Path::new("/etc/ssh/sshd_config"), &excludes));
+        // quirk: plain starts_with, not path-aware — "/etc/ssl" also excludes "/etc/ssl-evil"
+        assert!(reg.is_excluded(Path::new("/etc/ssl-evil/x"), &excludes));
+    }
+
+    #[test]
+    fn matches_pattern_matches_filename_only_and_ignores_invalid_patterns() {
+        let reg = Registry::empty();
+        let patterns = vec!["id_*".to_string(), "*.pem".to_string(), "config".to_string(), "[".to_string()];
+        assert!(reg.matches_pattern_with_config(Path::new("/a/b/id_rsa"), &patterns));
+        assert!(reg.matches_pattern_with_config(Path::new("/a/b/cert.pem"), &patterns));
+        assert!(reg.matches_pattern_with_config(Path::new("/etc/ssh/config"), &patterns));
+        assert!(!reg.matches_pattern_with_config(Path::new("/a/b/other.txt"), &patterns));
+        assert!(!reg.matches_pattern_with_config(Path::new("/"), &patterns));
+    }
+
+    #[test]
+    fn toml_round_trip_preserves_plain_entries() {
+        let mut reg = Registry::empty();
+        let mut e1 = entry("/home/u/.ssh/config");
+        e1.category = "ssh-keys".into();
+        e1.tags = vec!["bastion".into(), "prod".into()];
+        e1.description = "Main ssh config".to_string();
+        let mut e2 = entry("/etc/ssl/server.pem");
+        e2.alias = Some("srv".into());
+        e2.related = vec!["/etc/ssl/ca.pem".into()];
+        reg.entries = vec![e1, e2, entry("/plain/path")];
+
+        let parsed = Registry::parse_toml(&reg.to_toml_string().unwrap()).unwrap();
+        assert_eq!(parsed.entries, reg.entries);
+        assert!(parsed.suggestions.is_empty());
+    }
+
+    #[test]
+    fn toml_serialization_escapes_but_parsing_never_unescapes() {
+        let mut reg = Registry::empty();
+        let mut e = entry("x");
+        e.path = r"C:\dir\file".into();
+        e.description = "line1\nline2\ttab".into();
+        reg.entries = vec![e];
+
+        let s = reg.to_toml_string().unwrap();
+        assert!(s.contains(r#"path = "C:\\dir\\file""#));
+        assert!(s.contains("description = \"line1\\nline2\\ttab\""));
+
+        // parse side keeps the escape sequences literally (no unescaping today)
+        let parsed = Registry::parse_toml(&s).unwrap();
+        assert_eq!(parsed.entries[0].path, r"C:\\dir\\file");
+        assert_eq!(parsed.entries[0].description, "line1\\nline2\\ttab");
+    }
+
+    #[test]
+    fn toml_output_format_is_stable() {
+        let mut reg = Registry::empty();
+        let mut e = entry("/a/b");
+        e.category = "certs".into();
+        reg.entries = vec![e];
+        assert_eq!(
+            reg.to_toml_string().unwrap(),
+            "# arioch — security file index\n\
+             # Managed by arioch. Safe to edit by hand.\n\
+             \n\
+             [[entry]]\n\
+             path = \"/a/b\"\n\
+             category = \"certs\"\n\
+             \n"
+        );
+    }
+
+    #[test]
+    fn add_entry_replaces_on_same_path_and_pushes_new() {
+        let mut reg = Registry::empty();
+        let mut e1 = entry("/a");
+        e1.category = "old".into();
+        let mut e2 = entry("/a");
+        e2.category = "new".into();
+        reg.add_entry(e1);
+        reg.add_entry(e2);
+        reg.add_entry(entry("/b"));
+        assert_eq!(reg.entries.len(), 2);
+        assert_eq!(reg.entries[0].category, "new");
+        assert_eq!(reg.entries[1].path, "/b");
+    }
+
+    #[test]
+    fn categories_are_sorted_deduped_and_skip_empty() {
+        let mut reg = Registry::empty();
+        let mut e1 = entry("/a");
+        e1.category = "b".into();
+        let mut e2 = entry("/b");
+        e2.category = "a".into();
+        let mut e3 = entry("/c");
+        e3.category = "b".into();
+        reg.entries = vec![e1, e2, e3, entry("/d")];
+        assert_eq!(reg.categories(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(reg.entries_in_category("b"), vec![0usize, 2]);
+    }
 }

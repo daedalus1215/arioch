@@ -1,0 +1,8 @@
+Found 7 potential security files:
+  /home/spacecowboy/Projects/arioch/tests/baseline/.scratch/scan/app/.env
+  /home/spacecowboy/Projects/arioch/tests/baseline/.scratch/scan/app/credentials.toml
+  /home/spacecowboy/Projects/arioch/tests/baseline/.scratch/scan/certs/server.pem
+  /home/spacecowboy/Projects/arioch/tests/baseline/.scratch/scan/deep/a/b/c/key.key
+  /home/spacecowboy/Projects/arioch/tests/baseline/.scratch/scan/single.pem
+  /home/spacecowboy/Projects/arioch/tests/baseline/.scratch/scan/ssh/config
+  /home/spacecowboy/Projects/arioch/tests/baseline/.scratch/scan/ssh/id_rsa

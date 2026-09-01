@@ -1,0 +1,27 @@
+[
+  {
+    "category": "ssh-keys",
+    "id": "config",
+    "related": []
+  },
+  {
+    "category": "creds",
+    "id": "tokens.json",
+    "related": []
+  },
+  {
+    "category": "other",
+    "id": ".env",
+    "related": []
+  },
+  {
+    "category": "certs",
+    "id": "srv",
+    "related": []
+  },
+  {
+    "category": "ssh-keys",
+    "id": "id_ed25519",
+    "related": []
+  }
+]

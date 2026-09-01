@@ -1971,3 +1971,114 @@ fn expand_path(path: &str) -> String {
     }
     path.to_string()
 }
+
+// ─── Characterization tests (Phase 0) ──────────────────────────────────────
+// Pin current behavior of the pure helpers before they move to domain::rules.
+// NOTE: guess_category and expand_path here differ from the copies in main.rs;
+// both sets of tests must keep passing (behavior must not change).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Inverse of `days_to_ymd` (Hinnant days_from_civil), for round-trip checks.
+    fn ymd_to_days(y: i64, m: i64, d: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let mp = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146097 + doe - 719468
+    }
+
+    #[test]
+    fn days_to_ymd_known_dates() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+        assert_eq!(days_to_ymd(1), (1970, 1, 2));
+        assert_eq!(days_to_ymd(-1), (1969, 12, 31));
+        assert_eq!(days_to_ymd(59), (1970, 3, 1));
+        assert_eq!(days_to_ymd(18321), (2020, 2, 29)); // leap year
+        assert_eq!(days_to_ymd(11016), (2000, 2, 29)); // century leap year
+        assert_eq!(days_to_ymd(-25567), (1900, 1, 1)); // non-leap century boundary
+        assert_eq!(days_to_ymd(20088), (2024, 12, 31));
+    }
+
+    #[test]
+    fn days_to_ymd_round_trips_over_wide_range() {
+        for days in -100_000..=100_000 {
+            let (y, m, d) = days_to_ymd(days);
+            assert_eq!(ymd_to_days(y, m, d), days, "round trip failed at {days}");
+        }
+    }
+
+    #[test]
+    fn iso_now_has_utc_shape_and_todays_date() {
+        let now = iso_now();
+        assert_eq!(now.len(), 20, "unexpected shape: {now}");
+        assert!(now.ends_with('Z'));
+        assert_eq!(&now[4..5], "-");
+        assert_eq!(&now[7..8], "-");
+        assert_eq!(&now[10..11], "T");
+        assert_eq!(&now[13..14], ":");
+        assert_eq!(&now[16..17], ":");
+        let y: i64 = now[0..4].parse().unwrap();
+        let m: u32 = now[5..7].parse().unwrap();
+        let d: u32 = now[8..10].parse().unwrap();
+        let h: u32 = now[11..13].parse().unwrap();
+        let min: u32 = now[14..16].parse().unwrap();
+        let s: u32 = now[17..19].parse().unwrap();
+        assert!(y >= 1970 && y <= 2100);
+        assert!((1..=12).contains(&m));
+        assert!((1..=31).contains(&d));
+        assert!(h < 24 && min < 60 && s < 60);
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // allow today or yesterday (midnight race)
+        let today = days_to_ymd(secs / 86400);
+        let yesterday = days_to_ymd(secs / 86400 - 1);
+        assert!(
+            (y, m as i64, d as i64) == today || (y, m as i64, d as i64) == yesterday,
+            "date part {y:04}-{m:02}-{d:02} is not today"
+        );
+    }
+
+    #[test]
+    fn app_guess_category_branches_and_precedence() {
+        assert_eq!(guess_category("/home/u/.ssh/config"), "ssh-keys");
+        assert_eq!(guess_category("/home/u/ssh_key.pem"), "ssh-keys"); // ssh_key beats .pem
+        assert_eq!(guess_category("/home/u/keys/id_rsa"), "ssh-keys");
+        assert_eq!(guess_category("/etc/ssl/server.pem"), "certificates");
+        assert_eq!(guess_category("/etc/ssl/x.crt"), "certificates");
+        assert_eq!(guess_category("/etc/ssl/my.cert"), "certificates"); // .cert extension
+        assert_eq!(guess_category("/etc/ssl/cert-bundle"), "system-config"); // "cert" without a leading dot does NOT match ".cert"
+        assert_eq!(guess_category("/home/u/.gnupg/secring.gpg"), "gpg");
+        assert_eq!(guess_category("/home/u/.aws/credentials"), "secrets");
+        assert_eq!(guess_category("/home/u/.env"), "secrets");
+        assert_eq!(guess_category("/home/u/secret.txt"), "secrets");
+        assert_eq!(guess_category("/etc/hosts"), "system-config");
+        assert_eq!(guess_category("/home/u/.config/app/settings.json"), "app-config");
+        assert_eq!(guess_category("/var/log/x"), "other");
+        // case-insensitive
+        assert_eq!(guess_category("/HOME/U/.SSH/CONFIG"), "ssh-keys");
+    }
+
+    #[test]
+    fn app_expand_path_tilde_uses_home() {
+        match std::env::var("HOME") {
+            Ok(home) => {
+                assert_eq!(expand_path("~/x"), format!("{home}/x"));
+                assert_eq!(expand_path("~"), home);
+                // quirk: "~user" is not treated specially — "user" ends up under $HOME
+                assert_eq!(expand_path("~user/x"), format!("{home}user/x"));
+            }
+            Err(_) => {
+                assert_eq!(expand_path("~/x"), "~/x");
+            }
+        }
+        assert_eq!(expand_path("/abs/path"), "/abs/path");
+        assert_eq!(expand_path("rel/path"), "rel/path");
+    }
+}

@@ -551,3 +551,160 @@ fn builtin_entries() -> Vec<KnowledgeEntry> {
         },
     ]
 }
+
+// ─── Characterization tests (Phase 0) ──────────────────────────────────────
+// Pin current behavior of the detect_* core logic before it moves to domain.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kb() -> KnowledgeBase {
+        KnowledgeBase { entries: builtin_entries() }
+    }
+
+    type Row = (usize, String, String, Option<String>, Option<(String, Danger)>);
+
+    fn rows(dks: Vec<DetectedKey>) -> Vec<Row> {
+        dks.into_iter()
+            .map(|d| (d.line, d.key, d.value, d.section, d.entry.map(|e| (e.key, e.danger))))
+            .collect()
+    }
+
+    #[test]
+    fn detect_ssh_picks_up_keys_sections_and_skips_comments() {
+        let content = "# comment\n\
+                       Host prod\n\
+                         HostName prod.example.com\n\
+                         User   deploy\n\
+                       \n\
+                       Match host 192.168.*\n\
+                         Port 2222\n\
+                         ForwardAgent yes\n";
+        let got = rows(kb().detect(content, "ssh"));
+        assert_eq!(
+            got,
+            vec![
+                (2, "HostName".into(), "prod.example.com".into(), Some("Host prod".into()), Some(("HostName".into(), Danger::Safe))),
+                (3, "User".into(), "deploy".into(), Some("Host prod".into()), Some(("User".into(), Danger::Safe))),
+                (6, "Port".into(), "2222".into(), Some("Match host 192.168.*".into()), Some(("Port".into(), Danger::Safe))),
+                (7, "ForwardAgent".into(), "yes".into(), Some("Match host 192.168.*".into()), Some(("ForwardAgent".into(), Danger::Dangerous))),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_ssh_skips_key_only_lines_and_links_unknown_keys() {
+        let content = "User\n\
+                       IdentityFile ~/.ssh/id_rsa\n\
+                       UnknownDirective foo\n";
+        let got = rows(kb().detect(content, "ssh"));
+        assert_eq!(
+            got,
+            vec![
+                (1, "IdentityFile".into(), "~/.ssh/id_rsa".into(), None, Some(("IdentityFile".into(), Danger::Caution))),
+                (2, "UnknownDirective".into(), "foo".into(), None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_keyvalue_parses_eq_colon_sections_and_comments() {
+        let content = "; ini comment\n\
+                       # toml comment\n\
+                       [profile default]\n\
+                       aws_access_key_id = AKIA123\n\
+                       region: us-east-1\n\
+                       output json\n";
+        let got = rows(kb().detect(content, "ini"));
+        assert_eq!(
+            got,
+            vec![
+                (3, "aws_access_key_id".into(), "AKIA123".into(), Some("profile default".into()), Some(("aws_access_key_id".into(), Danger::Dangerous))),
+                (4, "region".into(), "us-east-1".into(), Some("profile default".into()), Some(("region".into(), Danger::Safe))),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_keyvalue_skips_keys_longer_than_50_chars() {
+        let content = format!("{}=x\n{}=y\n", "k".repeat(51), "k".repeat(50));
+        let got = rows(kb().detect(&content, "toml"));
+        assert_eq!(got, vec![(1, "k".repeat(50), "y".into(), None, None)]);
+    }
+
+    #[test]
+    fn detect_hosts_joins_names_and_never_links_entries() {
+        let content = "# comment\n127.0.0.1 localhost myapp.local\n::1 localhost\nsingle\n";
+        let got = rows(kb().detect(content, "hosts"));
+        assert_eq!(
+            got,
+            vec![
+                (1, "127.0.0.1".into(), "localhost, myapp.local".into(), None, None),
+                (2, "::1".into(), "localhost".into(), None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_env_strips_export_prefix_and_lookup_is_case_insensitive() {
+        let content = "# comment\nexport PATH=/usr/bin\nTOKEN=abc\nno-equals-here\n";
+        let got = rows(kb().detect(content, "env"));
+        assert_eq!(
+            got,
+            vec![
+                (1, "PATH".into(), "/usr/bin".into(), None, Some(("path".into(), Danger::Safe))),
+                (2, "TOKEN".into(), "abc".into(), None, Some(("token".into(), Danger::Dangerous))),
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_dispatches_on_file_type_and_defaults_to_keyvalue() {
+        let kv = "a = b\n";
+        let ssh = "Host h\n  Port 22\n";
+        assert_eq!(rows(kb().detect(kv, "ini")), rows(kb().detect(kv, "toml")));
+        assert_eq!(rows(kb().detect(kv, "toml")), rows(kb().detect(kv, "what-is-this")));
+        assert_ne!(rows(kb().detect(ssh, "ssh")), rows(kb().detect(ssh, "toml")));
+    }
+
+    #[test]
+    fn lookup_is_case_insensitive() {
+        assert!(kb().lookup("STRICTHOSTKEYCHECKING").is_some());
+        assert_eq!(kb().lookup("identityfile").unwrap().danger, Danger::Caution);
+        assert!(kb().lookup("not_a_key").is_none());
+    }
+
+    #[test]
+    fn parse_user_knowledge_sections() {
+        let content = "[identityfile]\n\
+                       what = \"Your key\"\n\
+                       danger = \"caution\"\n\
+                       \n\
+                       [custom_key]\n\
+                       what = \"Custom\"\n\
+                       why = \"Because\"\n\
+                       how = \"Do it\"\n\
+                       danger = \"dangerous\"\n";
+        let entries = parse_user_knowledge(content).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key, "identityfile");
+        assert_eq!(entries[0].what, "Your key");
+        assert_eq!(entries[0].why, "");
+        assert_eq!(entries[0].how, "");
+        assert_eq!(entries[0].danger, Danger::Caution);
+        assert_eq!(entries[1].key, "custom_key");
+        assert_eq!(entries[1].what, "Custom");
+        assert_eq!(entries[1].why, "Because");
+        assert_eq!(entries[1].how, "Do it");
+        assert_eq!(entries[1].danger, Danger::Dangerous);
+    }
+
+    #[test]
+    fn parse_user_knowledge_defaults_danger_to_safe() {
+        let content = "[plain]\nwhat = \"x\"\n";
+        let entries = parse_user_knowledge(content).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].danger, Danger::Safe);
+    }
+}

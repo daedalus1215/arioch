@@ -1,0 +1,45 @@
+[
+  {
+    "alias": null,
+    "category": "ssh-keys",
+    "description": "",
+    "path": "/home/spacecowboy/Projects/arioch/tests/baseline/.scratch/files/.ssh/config",
+    "related": [],
+    "tags": []
+  },
+  {
+    "alias": null,
+    "category": "creds",
+    "description": "",
+    "path": "/home/spacecowboy/Projects/arioch/tests/baseline/.scratch/files/creds/tokens.json",
+    "related": [],
+    "tags": []
+  },
+  {
+    "alias": null,
+    "category": "other",
+    "description": "",
+    "path": "/home/spacecowboy/Projects/arioch/tests/baseline/.scratch/files/app/.env",
+    "related": [],
+    "tags": []
+  },
+  {
+    "alias": "srv",
+    "category": "certs",
+    "description": "Server certificate",
+    "path": "/home/spacecowboy/Projects/arioch/tests/baseline/.scratch/files/certs/server.pem",
+    "related": [],
+    "tags": [
+      "tls",
+      "web"
+    ]
+  },
+  {
+    "alias": null,
+    "category": "ssh-keys",
+    "description": "",
+    "path": "/home/spacecowboy/Projects/arioch/tests/baseline/.scratch/files/.ssh/id_ed25519",
+    "related": [],
+    "tags": []
+  }
+]

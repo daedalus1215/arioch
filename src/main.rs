@@ -442,3 +442,43 @@ refresh_interval = 2
     println!("  Use with: arioch --config {}", path);
     Ok(())
 }
+
+// ─── Characterization tests (Phase 0) ──────────────────────────────────────
+// Pin the CLI-side copies of guess_category/expand_path. These DIFFER from the
+// app.rs versions (different rules, different category names, shellexpand vs
+// manual ~ expansion) — both must survive the refactor unchanged.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_guess_category_branches() {
+        assert_eq!(guess_category("/home/u/.ssh/config"), "ssh-keys"); // .ssh
+        assert_eq!(guess_category("/home/u/id_rsa"), "ssh-keys"); // id_
+        assert_eq!(guess_category("/etc/ssl/server.pem"), "certs"); // .pem
+        assert_eq!(guess_category("/etc/ssl/certificate"), "certs"); // cert substring
+        assert_eq!(guess_category("/etc/ssl/x.crt"), "certs"); // .crt
+        assert_eq!(guess_category("/home/u/.aws/credentials"), "creds"); // credential substring
+        assert_eq!(guess_category("/home/u/tokens.json"), "creds"); // token
+        assert_eq!(guess_category("/home/u/secret.txt"), "creds"); // secret
+        assert_eq!(guess_category("/home/u/app.toml"), "configs"); // .toml
+        assert_eq!(guess_category("/home/u/.config/x"), "configs"); // config substring
+        assert_eq!(guess_category("/home/u/cfg.yaml"), "configs"); // .yaml
+        assert_eq!(guess_category("/home/u/cfg.yml"), "configs"); // .yml
+        assert_eq!(guess_category("/home/u/.env"), "other"); // no .env branch in the CLI copy
+        assert_eq!(guess_category("/home/u/keys.gpg"), "other"); // no gpg branch in the CLI copy
+        assert_eq!(guess_category("/var/log/x"), "other");
+        // case-insensitive
+        assert_eq!(guess_category("/HOME/U/.SSH/CONFIG"), "ssh-keys");
+    }
+
+    fn cli_expand_path_uses_shellexpand() {
+        assert_eq!(expand_path("/abs/path"), std::path::PathBuf::from("/abs/path"));
+        assert_eq!(expand_path("rel/path"), std::path::PathBuf::from("rel/path"));
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(expand_path("~"), std::path::PathBuf::from(&home));
+            assert_eq!(expand_path("~/x"), std::path::PathBuf::from(format!("{home}/x")));
+        }
+    }
+}
