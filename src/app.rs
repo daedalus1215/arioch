@@ -429,17 +429,7 @@ impl App {
                 self.copy_path();
             }
             crossterm::event::KeyCode::Char('s') => {
-                self.mode = Mode::Suggestions;
-                self.suggestions = crate::domain::use_cases::scan::scan_for_suggestions(
-                    self.fs.as_ref(),
-                    &crate::domain::value::ScanConfig {
-                        scan_paths: self.config.scan_paths.clone(),
-                        exclude_paths: self.config.exclude_paths.clone(),
-                        scan_patterns: self.config.scan_patterns.clone(),
-                        scan_depth: self.config.scan_depth,
-                    },
-                );
-                self.set_message("Scanning for security files...");
+                self.start_scan();
             }
             crossterm::event::KeyCode::Char('/') => {
                 self.mode = Mode::Search;
@@ -534,6 +524,26 @@ impl App {
         }
     }
 
+    /// Run the security-file scan and enter the suggestions view (the 's' action).
+    fn start_scan(&mut self) {
+        self.mode = Mode::Suggestions;
+        self.suggestions = crate::domain::use_cases::scan::scan_for_suggestions(
+            self.fs.as_ref(),
+            &self.scan_config(),
+        );
+        self.set_message("Scanning for security files...");
+    }
+
+    /// The active scan config, projected from the loaded `Config`.
+    fn scan_config(&self) -> crate::domain::value::ScanConfig {
+        crate::domain::value::ScanConfig {
+            scan_paths: self.config.scan_paths.clone(),
+            exclude_paths: self.config.exclude_paths.clone(),
+            scan_patterns: self.config.scan_patterns.clone(),
+            scan_depth: self.config.scan_depth,
+        }
+    }
+
     fn handle_search(&mut self, key: KeyEvent) {
         match key.code {
             crossterm::event::KeyCode::Char(c) => {
@@ -610,65 +620,10 @@ impl App {
                 }
             }
             crossterm::event::KeyCode::Char('a') => {
-                // Accept selected
-                if self.suggestions.get(self.suggestion_selected).is_some() {
-                    let path = self.suggestions[self.suggestion_selected]
-                        .to_string_lossy()
-                        .into_owned();
-                    if !self.entries.iter().any(|e| e.path == path) {
-                        let category = crate::domain::rules::guess_category_tui(&path);
-                        crate::domain::use_cases::entry::upsert_entry(&mut self.entries, Entry {
-                            path: path.clone(),
-                            category,
-                            tags: Vec::new(),
-                            description: String::new(),
-                            alias: None,
-                            related: Vec::new(),
-                        });
-                        self.suggestion_accepted += 1;
-                        if let Err(e) = self.registry_store.save(&self.entries) {
-                            self.set_message(&format!("Save failed: {}", e));
-                        }
-                        self.set_message(&format!("Added: {}", path));
-                    }
-                    // Remove from suggestions
-                    self.suggestions.remove(self.suggestion_selected);
-                    self.suggestion_selected = self.suggestion_selected
-                        .min(self.suggestions.len().saturating_sub(1));
-                }
+                self.accept_suggestion();
             }
             crossterm::event::KeyCode::Char('A') => {
-                // Accept all
-                let suggestions: Vec<String> = self
-                    .suggestions
-                    .iter()
-                    .filter(|p| {
-                        !self
-                            .entries
-                            .iter()
-                            .any(|e| e.path == p.to_string_lossy())
-                    })
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect();
-                for path in &suggestions {
-                    let category = crate::domain::rules::guess_category_tui(path);
-                    crate::domain::use_cases::entry::upsert_entry(&mut self.entries, Entry {
-                        path: path.clone(),
-                        category,
-                        tags: Vec::new(),
-                        description: String::new(),
-                        alias: None,
-                        related: Vec::new(),
-                    });
-                }
-                self.suggestion_accepted += suggestions.len();
-                self.suggestions.clear();
-                if let Err(e) = self.registry_store.save(&self.entries) {
-                    self.set_message(&format!("Save failed: {}", e));
-                    return;
-                }
-                self.set_message(&format!("Added {} entries.", suggestions.len()));
-                self.mode = Mode::View;
+                self.accept_all_suggestions();
             }
             crossterm::event::KeyCode::Char('d') => {
                 // Reject selected
@@ -679,40 +634,10 @@ impl App {
                 }
             }
             crossterm::event::KeyCode::Char('e') | crossterm::event::KeyCode::Enter => {
-                // Preview selected
-                if let Some(path_buf) = self.suggestions.get(self.suggestion_selected) {
-                    let path = path_buf.to_string_lossy().into_owned();
-                    let expanded = crate::domain::rules::expand_path(&path);
-                    match self.fs.read_to_string(Path::new(&expanded)) {
-                        Ok(content) => {
-                            self.file_content = Some(content);
-                            self.file_error = None;
-                            self.scroll_offset = 0;
-                            self.set_message(&format!("Preview: {}", path));
-                        }
-                        Err(e) => {
-                            self.set_message(&format!("Cannot read: {}", e));
-                        }
-                    }
-                }
+                self.preview_suggestion();
             }
             crossterm::event::KeyCode::Char('r') => {
-                // Re-scan
-                self.suggestions = crate::domain::use_cases::scan::scan_for_suggestions(
-                    self.fs.as_ref(),
-                    &crate::domain::value::ScanConfig {
-                        scan_paths: self.config.scan_paths.clone(),
-                        exclude_paths: self.config.exclude_paths.clone(),
-                        scan_patterns: self.config.scan_patterns.clone(),
-                        scan_depth: self.config.scan_depth,
-                    },
-                );
-                self.suggestion_selected = 0;
-                self.suggestion_filter.clear();
-                self.set_message(&format!(
-                    "Re-scanned: {} found",
-                    self.suggestions.len()
-                ));
+                self.rescan_suggestions();
             }
             crossterm::event::KeyCode::Backspace => {
                 self.suggestion_filter.pop();
@@ -722,6 +647,102 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Accept the selected suggestion: upsert it, persist, drop it from the list.
+    fn accept_suggestion(&mut self) {
+        if self.suggestions.get(self.suggestion_selected).is_some() {
+            let path = self.suggestions[self.suggestion_selected]
+                .to_string_lossy()
+                .into_owned();
+            if !self.entries.iter().any(|e| e.path == path) {
+                let category = crate::domain::rules::guess_category_tui(&path);
+                crate::domain::use_cases::entry::upsert_entry(&mut self.entries, Entry {
+                    path: path.clone(),
+                    category,
+                    tags: Vec::new(),
+                    description: String::new(),
+                    alias: None,
+                    related: Vec::new(),
+                });
+                self.suggestion_accepted += 1;
+                if let Err(e) = self.registry_store.save(&self.entries) {
+                    self.set_message(&format!("Save failed: {}", e));
+                }
+                self.set_message(&format!("Added: {}", path));
+            }
+            // Remove from suggestions
+            self.suggestions.remove(self.suggestion_selected);
+            self.suggestion_selected = self.suggestion_selected
+                .min(self.suggestions.len().saturating_sub(1));
+        }
+    }
+
+    /// Accept every unregistered suggestion at once, then return to the view.
+    fn accept_all_suggestions(&mut self) {
+        let suggestions: Vec<String> = self
+            .suggestions
+            .iter()
+            .filter(|p| {
+                !self
+                    .entries
+                    .iter()
+                    .any(|e| e.path == p.to_string_lossy())
+            })
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        for path in &suggestions {
+            let category = crate::domain::rules::guess_category_tui(path);
+            crate::domain::use_cases::entry::upsert_entry(&mut self.entries, Entry {
+                path: path.clone(),
+                category,
+                tags: Vec::new(),
+                description: String::new(),
+                alias: None,
+                related: Vec::new(),
+            });
+        }
+        self.suggestion_accepted += suggestions.len();
+        self.suggestions.clear();
+        if let Err(e) = self.registry_store.save(&self.entries) {
+            self.set_message(&format!("Save failed: {}", e));
+            return;
+        }
+        self.set_message(&format!("Added {} entries.", suggestions.len()));
+        self.mode = Mode::View;
+    }
+
+    /// Load the selected suggestion's file into the view pane (preview).
+    fn preview_suggestion(&mut self) {
+        if let Some(path_buf) = self.suggestions.get(self.suggestion_selected) {
+            let path = path_buf.to_string_lossy().into_owned();
+            let expanded = crate::domain::rules::expand_path(&path);
+            match self.fs.read_to_string(Path::new(&expanded)) {
+                Ok(content) => {
+                    self.file_content = Some(content);
+                    self.file_error = None;
+                    self.scroll_offset = 0;
+                    self.set_message(&format!("Preview: {}", path));
+                }
+                Err(e) => {
+                    self.set_message(&format!("Cannot read: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Re-run the scan, replacing the suggestion list.
+    fn rescan_suggestions(&mut self) {
+        self.suggestions = crate::domain::use_cases::scan::scan_for_suggestions(
+            self.fs.as_ref(),
+            &self.scan_config(),
+        );
+        self.suggestion_selected = 0;
+        self.suggestion_filter.clear();
+        self.set_message(&format!(
+            "Re-scanned: {} found",
+            self.suggestions.len()
+        ));
     }
 
     fn handle_map(&mut self, key: KeyEvent) {
@@ -1266,29 +1287,34 @@ impl App {
 
     fn handle_annot_view(&mut self, key: KeyEvent) {
         if key.code == crossterm::event::KeyCode::Char('d') {
-            if let Some(i) = self.annot_view {
-                let ann = self.annotations[i].clone();
-                self.annotations.remove(i);
-                match self.annotation_store.save(&self.annotations) {
-                    Ok(()) => {
-                        self.log_action(
-                            "unannotate",
-                            &ann.path,
-                            &format!("lines={}-{}", ann.start, ann.end),
-                        );
-                        self.set_message(&format!(
-                            "Annotation removed (lines {}-{})",
-                            ann.start, ann.end
-                        ));
-                    }
-                    Err(e) => {
-                        self.annotations.insert(i, ann);
-                        self.set_message(&format!("Save failed: {}", e));
-                    }
-                }
-            }
+            self.delete_annotation();
             self.annot_view = None;
             self.mode = Mode::View;
+        }
+    }
+
+    /// Remove the annotation under review, persisting the store (reverts on save failure).
+    fn delete_annotation(&mut self) {
+        if let Some(i) = self.annot_view {
+            let ann = self.annotations[i].clone();
+            self.annotations.remove(i);
+            match self.annotation_store.save(&self.annotations) {
+                Ok(()) => {
+                    self.log_action(
+                        "unannotate",
+                        &ann.path,
+                        &format!("lines={}-{}", ann.start, ann.end),
+                    );
+                    self.set_message(&format!(
+                        "Annotation removed (lines {}-{})",
+                        ann.start, ann.end
+                    ));
+                }
+                Err(e) => {
+                    self.annotations.insert(i, ann);
+                    self.set_message(&format!("Save failed: {}", e));
+                }
+            }
         }
     }
 
