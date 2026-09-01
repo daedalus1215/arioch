@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,23 +117,7 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        let path = Self::config_path();
-        if !path.exists() {
-            return Self::default();
-        }
-        match fs::read_to_string(&path) {
-            Ok(content) => match toml::from_str::<Config>(&content) {
-                Ok(config) => config,
-                Err(e) => {
-                    eprintln!("arioch: warning: invalid config.toml ({}), using defaults", e);
-                    Self::default()
-                }
-            },
-            Err(e) => {
-                eprintln!("arioch: warning: cannot read config.toml ({}), using defaults", e);
-                Self::default()
-            }
-        }
+        crate::infra::config::load_config(&Self::config_path())
     }
 
     pub fn editor(&self) -> String {

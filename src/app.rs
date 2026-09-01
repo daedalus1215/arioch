@@ -14,7 +14,7 @@ pub enum Event {
     Key(KeyEvent),
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     View,
     Map,
@@ -1761,6 +1761,168 @@ impl App {
             }
         }
         Event::Tick
+    }
+
+    /// Build one frame's view model (converter).
+    ///
+    /// The only place render inputs are assembled: I/O (entry metadata via
+    /// the filesystem port, audit history via the audit port) and config
+    /// (category colors) are resolved here; the pure render functions in
+    /// `render.rs` consume the returned `View` and never touch `App` or I/O.
+    pub fn build_view(&self) -> crate::view::View<'_> {
+        let selected = self.selected_entry.and_then(|i| self.entries.get(i));
+        let selected_idx = self.selected_entry;
+
+        let categories = crate::domain::rules::categories(&self.entries)
+            .into_iter()
+            .map(|c| (c.clone(), crate::domain::rules::entries_in_category(&self.entries, &c)))
+            .collect();
+
+        // File metadata for the selected entry (port read, pre-formatted).
+        let meta_line = selected.and_then(|entry| {
+            let path = crate::domain::rules::expand_path(&entry.path);
+            let meta = self.fs.metadata(std::path::Path::new(&path)).ok()?;
+            let size = human_size(meta.len);
+            let mtime = meta
+                .modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| {
+                    let secs = d.as_secs() as i64;
+                    let days = secs / 86400;
+                    let rem = secs % 86400;
+                    let h = rem / 3600;
+                    let m = (rem % 3600) / 60;
+                    let (year, month, day) = crate::domain::rules::days_to_ymd(days);
+                    format!("{}-{:02}-{:02} {:02}:{:02}", year, month, day, h, m)
+                })
+                .unwrap_or_else(|| "?".into());
+            Some(format!(
+                "  Size: {}  Modified: {}  Perms: {:o}",
+                size,
+                mtime,
+                meta.mode & 0o777
+            ))
+        });
+
+        let main = crate::view::Main {
+            selected,
+            entries: &self.entries,
+            selected_idx,
+            search_query: self.search_query.clone(),
+            search_results: &self.search_results,
+            file_content: self.file_content.as_deref(),
+            file_error: self.file_error.as_deref(),
+            show_diff: self.show_diff,
+            baseline_content: self.baseline_content.as_deref(),
+            scroll_offset: self.scroll_offset,
+            meta_line,
+            annotations: &self.annotations,
+            annot_anchor: self.annot_anchor,
+            annot_cursor: self.annot_cursor,
+            annot_text: self.annot_text.clone(),
+        };
+
+        let edit = self.edit.as_ref().map(|state| crate::view::Edit {
+            state,
+            title: self
+                .selected_entry
+                .and_then(|i| self.entries.get(i))
+                .map(|e| format!(" EDIT: {} ", e.path))
+                .unwrap_or_else(|| " EDIT ".into()),
+            file_type: self
+                .selected_entry
+                .and_then(|i| self.entries.get(i))
+                .map(|e| {
+                    crate::syntax::detect_type(
+                        &e.path,
+                        state.lines.first().map(|s| s.as_str()).unwrap_or(""),
+                    )
+                })
+                .unwrap_or(crate::syntax::FileType::Plain),
+            scroll_offset: self.scroll_offset,
+        });
+
+        let sidebar = crate::view::Sidebar {
+            entries: &self.entries,
+            categories,
+            selected_category: self.selected_category.clone(),
+            selected_entry: self.selected_entry,
+            multi_selected: &self.multi_selected,
+        };
+
+        let map = crate::view::Map {
+            entries: &self.entries,
+            selected: self.map_selected,
+            zoom: self.map_zoom,
+            scroll: self.map_scroll,
+            colors: self
+                .entries
+                .iter()
+                .map(|e| self.config.category_color(&e.category))
+                .collect(),
+        };
+
+        let suggestions = crate::view::Suggestions {
+            items: &self.suggestions,
+            filter: self.suggestion_filter.clone(),
+            selected: self.suggestion_selected,
+            accepted: self.suggestion_accepted,
+            scroll: self.suggestion_scroll,
+        };
+
+        let investigate = crate::view::Investigate {
+            keys: &self.investigate_keys,
+            selected: self.investigate_selected,
+            scroll: self.investigate_scroll,
+        };
+
+        let status = crate::view::Status {
+            bulk_prompt: self.bulk_prompt.clone(),
+            bulk_input: self.bulk_input.clone(),
+            multi_selected_count: self.multi_selected.len(),
+            message: self.message.clone(),
+            entry_info: match self.selected_entry {
+                Some(idx) => self
+                    .entries
+                    .get(idx)
+                    .map(|e| format!(" {}:{} ", idx + 1, e.path))
+                    .unwrap_or_else(|| " ".into()),
+                None => " (no selection) ".into(),
+            },
+        };
+
+        let annot_view = self.annot_view.and_then(|i| self.annotations.get(i));
+
+        crate::view::View {
+            mode: self.mode,
+            show_help: self.show_help,
+            sidebar_expanded: self.sidebar_expanded,
+            sidebar_width: self.sidebar_width,
+            sidebar,
+            main,
+            edit,
+            map,
+            suggestions,
+            history: self.read_history(),
+            investigate,
+            status,
+            dialog: self.dialog.as_ref(),
+            annot_view,
+        }
+    }
+}
+
+/// Format a byte count for humans (view-model converter helper).
+fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 

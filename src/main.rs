@@ -5,7 +5,8 @@ mod domain;
 mod infra;
 mod knowledge;
 mod syntax;
-mod ui;
+mod render;
+mod view;
 
 use app::App;
 use clap::{Parser, Subcommand};
@@ -154,7 +155,10 @@ fn run_tui(active_dir: &std::path::Path) -> anyhow::Result<()> {
     let mut app = App::new(config, entries, active_dir.to_path_buf(), ports);
 
     loop {
-        terminal.draw(|f| ui::render(f, &app))?;
+        terminal.draw(|f| {
+            let v = app.build_view();
+            render::render(f, &v);
+        })?;
 
         match App::next_event() {
             app::Event::Key(key) => {
