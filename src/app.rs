@@ -2,6 +2,10 @@ use crate::config::Config;
 use crate::registry::{Entry, Registry};
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, KeyEventKind};
 use std::time::Duration;
+use std::path::Path;
+use crate::domain::ports::{
+    AnnotationStore, AuditLog, Clipboard, Editor, Filesystem, RegistryStore,
+};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
 
@@ -50,6 +54,12 @@ pub struct DialogState {
 pub struct App {
     pub config: Config,
     pub registry: Registry,
+    pub fs: Box<dyn Filesystem>,
+    pub editor: Box<dyn Editor>,
+    pub clipboard: Box<dyn Clipboard>,
+    pub audit: Box<dyn AuditLog>,
+    pub registry_store: Box<dyn RegistryStore>,
+    pub annotation_store: Box<dyn AnnotationStore>,
     pub selected_entry: Option<usize>,
     pub selected_category: Option<String>,
     pub mode: Mode,
@@ -91,18 +101,33 @@ pub struct App {
     pub annotations: Vec<crate::annotations::Annotation>,
 }
 
+
+/// I/O ports injected at the composition root (`run_tui`).
+pub struct AppPorts {
+    pub fs: Box<dyn Filesystem>,
+    pub editor: Box<dyn Editor>,
+    pub clipboard: Box<dyn Clipboard>,
+    pub audit: Box<dyn AuditLog>,
+    pub registry_store: Box<dyn RegistryStore>,
+    pub annotation_store: Box<dyn AnnotationStore>,
+}
 impl App {
-    pub fn new() -> Self {
-        let config = Config::load();
-        let registry = Registry::new();
+    pub fn new(config: Config, registry: Registry, ports: AppPorts) -> Self {
         let selected = if registry.entries.is_empty() {
             None
         } else {
             Some(0)
         };
+        let annotations = ports.annotation_store.load();
         Self {
             config,
             registry,
+            fs: ports.fs,
+            editor: ports.editor,
+            clipboard: ports.clipboard,
+            audit: ports.audit,
+            registry_store: ports.registry_store,
+            annotation_store: ports.annotation_store,
             selected_entry: selected,
             selected_category: None,
             mode: Mode::View,
@@ -141,7 +166,7 @@ impl App {
             annot_cursor: 0,
             annot_text: None,
             annot_view: None,
-            annotations: crate::annotations::AnnotationsFile::load(),
+            annotations,
         }
     }
 
@@ -159,66 +184,64 @@ impl App {
             p.push("index.toml");
             p
         };
-        if let Ok(meta) = std::fs::metadata(&index_path) {
-            if let Ok(mtime) = meta.modified() {
-                if let Some(last) = self.last_index_mtime {
-                    if mtime != last {
-                        // Reload registry
-                        match Registry::load() {
-                            Ok(new_registry) => {
-                                let selected_path = self
-                                    .selected_entry
-                                    .and_then(|i| self.registry.get_entry(i))
-                                    .map(|e| e.path.clone());
-                                let entry_count = new_registry.entries.len();
-                                self.registry = new_registry;
-                                // Re-select by path if still exists
-                                if let Some(ref path) = selected_path {
-                                    self.selected_entry = self
-                                        .registry
-                                        .entries
-                                        .iter()
-                                        .position(|e| &e.path == path);
-                                }
-                                self.refresh_content();
-                                self.set_message(&format!(
-                                    "Index reloaded ({} entries)",
-                                    entry_count
-                                ));
-                                self.last_index_mtime = Some(mtime);
-                                return;
+        if let Ok(meta) = self.fs.metadata(&index_path) {
+            let mtime = meta.modified;
+            if let Some(last) = self.last_index_mtime {
+                if mtime != last {
+                    // Reload registry
+                    match Registry::load() {
+                        Ok(new_registry) => {
+                            let selected_path = self
+                                .selected_entry
+                                .and_then(|i| self.registry.get_entry(i))
+                                .map(|e| e.path.clone());
+                            let entry_count = new_registry.entries.len();
+                            self.registry = new_registry;
+                            // Re-select by path if still exists
+                            if let Some(ref path) = selected_path {
+                                self.selected_entry = self
+                                    .registry
+                                    .entries
+                                    .iter()
+                                    .position(|e| &e.path == path);
                             }
-                            Err(e) => {
-                                self.set_message(&format!("Index reload failed: {}", e));
-                                self.last_index_mtime = Some(mtime);
-                                return;
-                            }
+                            self.refresh_content();
+                            self.set_message(&format!(
+                                "Index reloaded ({} entries)",
+                                entry_count
+                            ));
+                            self.last_index_mtime = Some(mtime);
+                            return;
+                        }
+                        Err(e) => {
+                            self.set_message(&format!("Index reload failed: {}", e));
+                            self.last_index_mtime = Some(mtime);
+                            return;
                         }
                     }
                 }
-                self.last_index_mtime = Some(mtime);
             }
+            self.last_index_mtime = Some(mtime);
         }
         if let Some(idx) = self.selected_entry {
             if let Some(entry) = self.registry.get_entry(idx) {
                 let path = crate::domain::rules::expand_path(&entry.path);
                 let entry_path = entry.path.clone();
-                match std::fs::metadata(&path) {
+                match self.fs.metadata(Path::new(&path)) {
                     Ok(metadata) => {
-                        if let Ok(mtime) = metadata.modified() {
-                            if let Some(last) = self.last_mtime {
-                                if mtime != last {
-                                    self.refresh_content();
-                                    self.last_mtime = Some(mtime);
-                                    self.set_message(&format!(
-                                        "File updated: {}",
-                                        entry_path
-                                    ));
-                                    return;
-                                }
+                        let mtime = metadata.modified;
+                        if let Some(last) = self.last_mtime {
+                            if mtime != last {
+                                self.refresh_content();
+                                self.last_mtime = Some(mtime);
+                                self.set_message(&format!(
+                                    "File updated: {}",
+                                    entry_path
+                                ));
+                                return;
                             }
-                            self.last_mtime = Some(mtime);
                         }
+                        self.last_mtime = Some(mtime);
                     }
                     Err(_) => {
                         if self.file_content.is_some() {
@@ -235,58 +258,11 @@ impl App {
     }
 
     fn log_action(&self, action: &str, path: &str, details: &str) {
-        let log_path = {
-            let mut p = Config::config_dir();
-            p.push("arioch");
-            p.push("history.log");
-            p
-        };
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| {
-                let secs = d.as_secs();
-                format!(
-                    "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                    1970 + secs / 86400,
-                    ((secs % 86400) / 3600) + 1,
-                    ((secs % 3600) / 60) + 1,
-                    (secs % 86400) / 3600,
-                    (secs % 3600) / 60,
-                    secs % 60
-                )
-            })
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        let line = format!("{} {} {} {}\n", timestamp, action, path, details);
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            let _ = file.write_all(line.as_bytes());
-        }
+        let _ = self.audit.append(action, path, details);
     }
 
     pub fn read_history(&self) -> Vec<String> {
-        let log_path = {
-            let mut p = Config::config_dir();
-            p.push("arioch");
-            p.push("history.log");
-            p
-        };
-        match std::fs::read_to_string(&log_path) {
-            Ok(content) => content
-                .lines()
-                .rev()
-                .take(20)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .map(|s| s.to_string())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        self.audit.recent(20)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -706,7 +682,7 @@ impl App {
                 if let Some(path_buf) = self.registry.suggestions.get(self.suggestion_selected) {
                     let path = path_buf.to_string_lossy().into_owned();
                     let expanded = crate::domain::rules::expand_path(&path);
-                    match std::fs::read_to_string(&expanded) {
+                    match self.fs.read_to_string(Path::new(&expanded)) {
                         Ok(content) => {
                             self.file_content = Some(content);
                             self.file_error = None;
@@ -892,13 +868,11 @@ impl App {
         };
         let path = crate::domain::rules::expand_path(&entry.path);
         #[cfg(unix)]
-        if let Ok(meta) = std::fs::metadata(&path) {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = meta.permissions().mode();
-            if mode & 0o200 == 0 {
+        if let Ok(meta) = self.fs.metadata(Path::new(&path)) {
+            if meta.mode & 0o200 == 0 {
                 self.set_message(&format!(
                     "File is read-only (mode {:o}) — use external editor (e)",
-                    mode & 0o777
+                    meta.mode & 0o777
                 ));
                 return;
             }
@@ -1076,7 +1050,7 @@ impl App {
         }
 
         let path = crate::domain::rules::expand_path(&entry.path);
-        if let Ok(original) = std::fs::read_to_string(&path) {
+        if let Ok(original) = self.fs.read_to_string(Path::new(&path)) {
             if original == content {
                 self.file_content = Some(content);
                 self.baseline_content = Some(self.file_content.clone().unwrap_or_default());
@@ -1088,7 +1062,7 @@ impl App {
             }
         }
 
-        match std::fs::write(&path, &content) {
+        match self.fs.write(Path::new(&path), &content) {
             Ok(()) => {
                 self.file_content = Some(content.clone());
                 self.baseline_content = Some(content.clone());
@@ -1393,11 +1367,11 @@ impl App {
                 let path = crate::domain::rules::expand_path(&entry.path);
 
                 // Check file size before loading
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    if metadata.len() > self.config.max_file_size as u64 {
+                if let Ok(metadata) = self.fs.metadata(Path::new(&path)) {
+                    if metadata.len > self.config.max_file_size as u64 {
                         self.file_error = Some(format!(
                             "File too large ({} bytes, max {}): {}",
-                            metadata.len(),
+                            metadata.len,
                             self.config.max_file_size,
                             path
                         ));
@@ -1405,7 +1379,7 @@ impl App {
                     }
                 }
 
-                match std::fs::read_to_string(&path) {
+                match self.fs.read_to_string(Path::new(&path)) {
                     Ok(content) => {
                         // Set baseline on first load of this entry
                         if self.baseline_entry != Some(idx) {
@@ -1427,15 +1401,12 @@ impl App {
             if let Some(entry) = self.registry.get_entry(idx) {
                 let path = crate::domain::rules::expand_path(&entry.path);
                 let entry_path = entry.path.clone();
-                let editor = self.config.editor();
-                let mut cmd = std::process::Command::new(&editor);
-                cmd.arg(&path);
                 // Disable raw mode while editor runs, re-enable after
                 let _ = crossterm::terminal::disable_raw_mode();
-                let status = cmd.status();
+                let result = self.editor.launch(Path::new(&path));
                 let _ = crossterm::terminal::enable_raw_mode();
-                match status {
-                    Ok(_) => {
+                match result {
+                    Ok(()) => {
                         self.refresh_content();
                         self.last_mtime = None;
                         self.set_message(&format!("Edited: {}", entry_path));
@@ -1463,48 +1434,7 @@ impl App {
     }
 
     fn copy_to_clipboard(&self, text: &str) -> bool {
-        // Try wl-copy (Wayland)
-        if std::process::Command::new("wl-copy")
-            .arg(text)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        // Try xclip (X11)
-        if let Ok(mut child) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                if stdin.write_all(text.as_bytes()).is_ok() {
-                    drop(stdin);
-                    if child.wait().map(|s| s.success()).unwrap_or(false) {
-                        return true;
-                    }
-                }
-            }
-        }
-        // Try xsel (X11 fallback)
-        if let Ok(mut child) = std::process::Command::new("xsel")
-            .args(["--clipboard", "--input"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                if stdin.write_all(text.as_bytes()).is_ok() {
-                    drop(stdin);
-                    if child.wait().map(|s| s.success()).unwrap_or(false) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        self.clipboard.copy(text)
     }
     fn add_entry_dialog(&mut self) {
         self.mode = Mode::Dialog;

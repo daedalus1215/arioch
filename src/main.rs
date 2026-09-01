@@ -328,7 +328,21 @@ fn expand_path(path: &str) -> std::path::PathBuf {
 fn run_tui() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new();
+    let config = config::Config::load();
+    let registry = Registry::new();
+    // audit log watches the raw config dir (today's behavior); registry and
+    // annotations honor the --config override
+    let audit_dir = config::Config::config_dir();
+    let active_dir = config::active_config_dir();
+    let ports = app::AppPorts {
+        fs: Box::new(infra::fs::RealFs),
+        editor: Box::new(infra::process::ShellEditor::new(config.editor())),
+        clipboard: Box::new(infra::process::SystemClipboard),
+        audit: Box::new(infra::audit_log::FileAuditLog::new(&audit_dir)),
+        registry_store: Box::new(infra::index_store::TomlIndex::new(&active_dir)),
+        annotation_store: Box::new(infra::annotations_store::TomlAnnotations::new(&active_dir)),
+    };
+    let mut app = App::new(config, registry, ports);
 
     loop {
         terminal.draw(|f| ui::render(f, &app))?;
