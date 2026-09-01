@@ -79,6 +79,10 @@ impl Filesystem for MemFs {
         out.sort();
         Ok(out)
     }
+
+    fn is_symlink(&self, _path: &Path) -> bool {
+        false
+    }
 }
 
 /// Editor that does nothing and succeeds.

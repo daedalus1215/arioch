@@ -15,6 +15,10 @@ pub trait Filesystem: Send + Sync {
     fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>>;
+    /// Lstat-style check: true when `path` itself is a symlink (the
+    /// followed `metadata()` cannot distinguish a symlinked dir from a
+    /// real dir, and the scan walk must not recurse into symlinked dirs).
+    fn is_symlink(&self, path: &Path) -> bool;
 }
 
 pub trait Editor: Send + Sync {

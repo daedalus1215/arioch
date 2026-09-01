@@ -1,8 +1,8 @@
 use crate::config::Config;
-use crate::registry::{Entry, Registry};
+use crate::domain::entity::Entry;
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, KeyEventKind};
 use std::time::Duration;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use crate::domain::ports::{
     AnnotationStore, AuditLog, Clipboard, Editor, Filesystem, RegistryStore,
 };
@@ -53,7 +53,8 @@ pub struct DialogState {
 }
 pub struct App {
     pub config: Config,
-    pub registry: Registry,
+    pub entries: Vec<Entry>,
+    pub suggestions: Vec<PathBuf>,
     pub fs: Box<dyn Filesystem>,
     pub editor: Box<dyn Editor>,
     pub clipboard: Box<dyn Clipboard>,
@@ -112,8 +113,8 @@ pub struct AppPorts {
     pub annotation_store: Box<dyn AnnotationStore>,
 }
 impl App {
-    pub fn new(config: Config, registry: Registry, ports: AppPorts) -> Self {
-        let selected = if registry.entries.is_empty() {
+    pub fn new(config: Config, entries: Vec<Entry>, ports: AppPorts) -> Self {
+        let selected = if entries.is_empty() {
             None
         } else {
             Some(0)
@@ -121,7 +122,8 @@ impl App {
         let annotations = ports.annotation_store.load();
         Self {
             config,
-            registry,
+            entries,
+            suggestions: Vec::new(),
             fs: ports.fs,
             editor: ports.editor,
             clipboard: ports.clipboard,
@@ -189,21 +191,18 @@ impl App {
             if let Some(last) = self.last_index_mtime {
                 if mtime != last {
                     // Reload registry
-                    match Registry::load() {
-                        Ok(new_registry) => {
+                    match self.registry_store.load() {
+                        Ok(new_entries) => {
                             let selected_path = self
                                 .selected_entry
-                                .and_then(|i| self.registry.get_entry(i))
+                                .and_then(|i| self.entries.get(i))
                                 .map(|e| e.path.clone());
-                            let entry_count = new_registry.entries.len();
-                            self.registry = new_registry;
+                            let entry_count = new_entries.len();
+                            self.entries = new_entries;
                             // Re-select by path if still exists
                             if let Some(ref path) = selected_path {
-                                self.selected_entry = self
-                                    .registry
-                                    .entries
-                                    .iter()
-                                    .position(|e| &e.path == path);
+                                self.selected_entry =
+                                    self.entries.iter().position(|e| &e.path == path);
                             }
                             self.refresh_content();
                             self.set_message(&format!(
@@ -224,7 +223,7 @@ impl App {
             self.last_index_mtime = Some(mtime);
         }
         if let Some(idx) = self.selected_entry {
-            if let Some(entry) = self.registry.get_entry(idx) {
+            if let Some(entry) = self.entries.get(idx) {
                 let path = crate::domain::rules::expand_path(&entry.path);
                 let entry_path = entry.path.clone();
                 match self.fs.metadata(Path::new(&path)) {
@@ -429,11 +428,14 @@ impl App {
             }
             crossterm::event::KeyCode::Char('s') => {
                 self.mode = Mode::Suggestions;
-                self.registry.scan_with_config(
-                    &self.config.scan_paths,
-                    &self.config.exclude_paths,
-                    &self.config.scan_patterns,
-                    self.config.scan_depth,
+                self.suggestions = crate::domain::use_cases::scan::scan_for_suggestions(
+                    self.fs.as_ref(),
+                    &crate::domain::value::ScanConfig {
+                        scan_paths: self.config.scan_paths.clone(),
+                        exclude_paths: self.config.exclude_paths.clone(),
+                        scan_patterns: self.config.scan_patterns.clone(),
+                        scan_depth: self.config.scan_depth,
+                    },
                 );
                 self.set_message("Scanning for security files...");
             }
@@ -556,7 +558,7 @@ impl App {
     }
 
     fn handle_suggestions(&mut self, key: KeyEvent) {
-        let total = self.registry.suggestions.len();
+        let total = self.suggestions.len();
 
         // Helper: get filtered suggestions
         let filtered: Vec<usize> = if self.suggestion_filter.is_empty() {
@@ -565,8 +567,7 @@ impl App {
             let filter = self.suggestion_filter.to_lowercase();
             (0..total)
                 .filter(|&i| {
-                    self.registry
-                        .suggestions
+                    self.suggestions
                         .get(i)
                         .map(|p| p.to_string_lossy().to_lowercase().contains(&filter))
                         .unwrap_or(false)
@@ -608,13 +609,13 @@ impl App {
             }
             crossterm::event::KeyCode::Char('a') => {
                 // Accept selected
-                if self.registry.suggestions.get(self.suggestion_selected).is_some() {
-                    let path = self.registry.suggestions[self.suggestion_selected]
+                if self.suggestions.get(self.suggestion_selected).is_some() {
+                    let path = self.suggestions[self.suggestion_selected]
                         .to_string_lossy()
                         .into_owned();
-                    if !self.registry.entries.iter().any(|e| e.path == path) {
+                    if !self.entries.iter().any(|e| e.path == path) {
                         let category = crate::domain::rules::guess_category_tui(&path);
-                        self.registry.add_entry(Entry {
+                        crate::domain::use_cases::entry::upsert_entry(&mut self.entries, Entry {
                             path: path.clone(),
                             category,
                             tags: Vec::new(),
@@ -623,26 +624,24 @@ impl App {
                             related: Vec::new(),
                         });
                         self.suggestion_accepted += 1;
-                        if let Err(e) = self.registry.save() {
+                        if let Err(e) = self.registry_store.save(&self.entries) {
                             self.set_message(&format!("Save failed: {}", e));
                         }
                         self.set_message(&format!("Added: {}", path));
                     }
                     // Remove from suggestions
-                    self.registry.suggestions.remove(self.suggestion_selected);
+                    self.suggestions.remove(self.suggestion_selected);
                     self.suggestion_selected = self.suggestion_selected
-                        .min(self.registry.suggestions.len().saturating_sub(1));
+                        .min(self.suggestions.len().saturating_sub(1));
                 }
             }
             crossterm::event::KeyCode::Char('A') => {
                 // Accept all
                 let suggestions: Vec<String> = self
-                    .registry
                     .suggestions
                     .iter()
                     .filter(|p| {
                         !self
-                            .registry
                             .entries
                             .iter()
                             .any(|e| e.path == p.to_string_lossy())
@@ -651,7 +650,7 @@ impl App {
                     .collect();
                 for path in &suggestions {
                     let category = crate::domain::rules::guess_category_tui(path);
-                    self.registry.add_entry(Entry {
+                    crate::domain::use_cases::entry::upsert_entry(&mut self.entries, Entry {
                         path: path.clone(),
                         category,
                         tags: Vec::new(),
@@ -661,8 +660,8 @@ impl App {
                     });
                 }
                 self.suggestion_accepted += suggestions.len();
-                self.registry.suggestions.clear();
-                if let Err(e) = self.registry.save() {
+                self.suggestions.clear();
+                if let Err(e) = self.registry_store.save(&self.entries) {
                     self.set_message(&format!("Save failed: {}", e));
                     return;
                 }
@@ -671,15 +670,15 @@ impl App {
             }
             crossterm::event::KeyCode::Char('d') => {
                 // Reject selected
-                if self.registry.suggestions.get(self.suggestion_selected).is_some() {
-                    self.registry.suggestions.remove(self.suggestion_selected);
+                if self.suggestions.get(self.suggestion_selected).is_some() {
+                    self.suggestions.remove(self.suggestion_selected);
                     self.suggestion_selected = self.suggestion_selected
-                        .min(self.registry.suggestions.len().saturating_sub(1));
+                        .min(self.suggestions.len().saturating_sub(1));
                 }
             }
             crossterm::event::KeyCode::Char('e') | crossterm::event::KeyCode::Enter => {
                 // Preview selected
-                if let Some(path_buf) = self.registry.suggestions.get(self.suggestion_selected) {
+                if let Some(path_buf) = self.suggestions.get(self.suggestion_selected) {
                     let path = path_buf.to_string_lossy().into_owned();
                     let expanded = crate::domain::rules::expand_path(&path);
                     match self.fs.read_to_string(Path::new(&expanded)) {
@@ -697,17 +696,20 @@ impl App {
             }
             crossterm::event::KeyCode::Char('r') => {
                 // Re-scan
-                self.registry.scan_with_config(
-                    &self.config.scan_paths,
-                    &self.config.exclude_paths,
-                    &self.config.scan_patterns,
-                    self.config.scan_depth,
+                self.suggestions = crate::domain::use_cases::scan::scan_for_suggestions(
+                    self.fs.as_ref(),
+                    &crate::domain::value::ScanConfig {
+                        scan_paths: self.config.scan_paths.clone(),
+                        exclude_paths: self.config.exclude_paths.clone(),
+                        scan_patterns: self.config.scan_patterns.clone(),
+                        scan_depth: self.config.scan_depth,
+                    },
                 );
                 self.suggestion_selected = 0;
                 self.suggestion_filter.clear();
                 self.set_message(&format!(
                     "Re-scanned: {} found",
-                    self.registry.suggestions.len()
+                    self.suggestions.len()
                 ));
             }
             crossterm::event::KeyCode::Backspace => {
@@ -721,7 +723,7 @@ impl App {
     }
 
     fn handle_map(&mut self, key: KeyEvent) {
-        let total = self.registry.entries.len();
+        let total = self.entries.len();
 
         match key.code {
             crossterm::event::KeyCode::Char('+') | crossterm::event::KeyCode::Char('=') => {
@@ -758,7 +760,7 @@ impl App {
             }
             crossterm::event::KeyCode::Enter => {
                 if let Some(idx) = self.map_selected {
-                    if self.registry.get_entry(idx).is_some() {
+        if self.entries.get(idx).is_some() {
                         self.selected_entry = Some(idx);
                         self.mode = Mode::View;
                         self.refresh_content();
@@ -777,7 +779,7 @@ impl App {
 
     fn open_investigate(&mut self) {
         if let Some(idx) = self.selected_entry {
-            if let Some(entry) = self.registry.get_entry(idx) {
+        if let Some(entry) = self.entries.get(idx) {
                 if let Some(ref content) = self.file_content {
                     let kb = crate::knowledge::KnowledgeBase::load();
                     let file_type = match crate::syntax::detect_type(&entry.path, content.lines().next().unwrap_or("")) {
@@ -855,7 +857,7 @@ impl App {
                 return;
             }
         };
-        let entry = match self.registry.get_entry(idx) {
+        let entry = match self.entries.get(idx) {
             Some(e) => e.clone(),
             None => return,
         };
@@ -1036,7 +1038,7 @@ impl App {
                 return;
             }
         };
-        let entry = match self.registry.get_entry(idx) {
+        let entry = match self.entries.get(idx) {
             Some(e) => e.clone(),
             None => {
                 self.mode = Mode::View;
@@ -1167,7 +1169,7 @@ impl App {
                 return;
             }
         };
-        let entry = match self.registry.get_entry(idx) {
+        let entry = match self.entries.get(idx) {
             Some(e) => e.clone(),
             None => {
                 self.mode = Mode::View;
@@ -1211,7 +1213,7 @@ impl App {
             Some(i) => i,
             None => return,
         };
-        let entry = match self.registry.get_entry(idx) {
+        let entry = match self.entries.get(idx) {
             Some(e) => e.clone(),
             None => return,
         };
@@ -1242,7 +1244,7 @@ impl App {
             Some(i) => i,
             None => return,
         };
-        let entry = match self.registry.get_entry(idx) {
+        let entry = match self.entries.get(idx) {
             Some(e) => e.clone(),
             None => return,
         };
@@ -1300,7 +1302,7 @@ impl App {
     }
 
     fn visual_order(&self) -> Vec<usize> {
-        crate::domain::rules::visual_order(&self.registry.entries)
+        crate::domain::rules::visual_order(&self.entries)
     }
 
     fn quick_jump(&mut self, code: crossterm::event::KeyCode) {
@@ -1363,7 +1365,7 @@ impl App {
         self.view_line = 0;
 
         if let Some(idx) = self.selected_entry {
-            if let Some(entry) = self.registry.get_entry(idx) {
+        if let Some(entry) = self.entries.get(idx) {
                 let path = crate::domain::rules::expand_path(&entry.path);
 
                 // Check file size before loading
@@ -1398,7 +1400,7 @@ impl App {
 
     fn open_editor(&mut self) {
         if let Some(idx) = self.selected_entry {
-            if let Some(entry) = self.registry.get_entry(idx) {
+        if let Some(entry) = self.entries.get(idx) {
                 let path = crate::domain::rules::expand_path(&entry.path);
                 let entry_path = entry.path.clone();
                 // Disable raw mode while editor runs, re-enable after
@@ -1421,7 +1423,7 @@ impl App {
 
     fn copy_path(&mut self) {
         if let Some(idx) = self.selected_entry {
-            if let Some(entry) = self.registry.get_entry(idx) {
+        if let Some(entry) = self.entries.get(idx) {
                 let path = crate::domain::rules::expand_path(&entry.path);
                 let copied = self.copy_to_clipboard(&path);
                 if copied {
@@ -1558,11 +1560,7 @@ impl App {
             .collect();
 
         // Check if path already exists
-        let is_update = self
-            .registry
-            .entries
-            .iter()
-            .any(|e| e.path == dialog.path);
+        let is_update = self.entries.iter().any(|e| e.path == dialog.path);
 
         let entry = Entry {
             path: dialog.path.trim().to_string(),
@@ -1577,9 +1575,9 @@ impl App {
             related,
         };
 
-        self.registry.add_entry(entry);
+        crate::domain::use_cases::entry::upsert_entry(&mut self.entries, entry);
 
-        if let Err(e) = self.registry.save() {
+        if let Err(e) = self.registry_store.save(&self.entries) {
             self.mode = Mode::View;
             self.set_message(&format!("Save failed: {}", e));
             return;
@@ -1587,11 +1585,10 @@ impl App {
 
         // Select the newly added/updated entry
         self.selected_entry = self
-            .registry
             .entries
             .iter()
             .position(|e| e.path == dialog.path.trim())
-            .or_else(|| self.registry.entries.first().map(|_| 0));
+            .or_else(|| self.entries.first().map(|_| 0));
 
         self.mode = Mode::View;
         self.refresh_content();
@@ -1609,16 +1606,16 @@ impl App {
 
     fn delete_from_dialog(&mut self) {
         if let Some(idx) = self.selected_entry {
-            if let Some(entry) = self.registry.get_entry(idx) {
+            if let Some(entry) = self.entries.get(idx) {
                 let path = entry.path.clone();
-                self.registry.remove_entry(idx);
-                if let Err(e) = self.registry.save() {
+                crate::domain::use_cases::entry::remove_entry(&mut self.entries, idx);
+                if let Err(e) = self.registry_store.save(&self.entries) {
                     self.set_message(&format!("Save failed: {}", e));
                     return;
                 }
-                self.selected_entry = if self.registry.entries.is_empty() {
+                self.selected_entry = if self.entries.is_empty() {
                     None
-                } else if idx >= self.registry.entries.len() {
+                } else if idx >= self.entries.len() {
                     Some(idx - 1)
                 } else {
                     Some(idx)
@@ -1633,16 +1630,16 @@ impl App {
 
     fn delete_selected(&mut self) {
         if let Some(idx) = self.selected_entry {
-            let entry = self.registry.get_entry(idx).cloned();
+            let entry = self.entries.get(idx).cloned();
             if let Some(e) = entry {
-                self.registry.remove_entry(idx);
-                if let Err(err) = self.registry.save() {
+                crate::domain::use_cases::entry::remove_entry(&mut self.entries, idx);
+                if let Err(err) = self.registry_store.save(&self.entries) {
                     self.set_message(&format!("Save failed: {}", err));
                     return;
                 }
-                self.selected_entry = if self.registry.entries.is_empty() {
+                self.selected_entry = if self.entries.is_empty() {
                     None
-                } else if idx >= self.registry.entries.len() {
+                } else if idx >= self.entries.len() {
                     Some(idx - 1)
                 } else {
                     Some(idx)
@@ -1660,14 +1657,14 @@ impl App {
         let mut indices: Vec<usize> = self.multi_selected.clone();
         indices.sort_by(|a, b| b.cmp(a));
         for idx in indices {
-            self.registry.remove_entry(idx);
+            crate::domain::use_cases::entry::remove_entry(&mut self.entries, idx);
         }
-        if let Err(e) = self.registry.save() {
+        if let Err(e) = self.registry_store.save(&self.entries) {
             self.set_message(&format!("Save failed: {}", e));
             return;
         }
         self.multi_selected.clear();
-        self.selected_entry = if self.registry.entries.is_empty() {
+        self.selected_entry = if self.entries.is_empty() {
             None
         } else {
             Some(0)
@@ -1680,13 +1677,9 @@ impl App {
     fn bulk_tag(&mut self, tag: &str) {
         let count = self.multi_selected.len();
         for &idx in &self.multi_selected {
-            if let Some(entry) = self.registry.get_entry_mut(idx) {
-                if !entry.tags.iter().any(|t| t == tag) {
-                    entry.tags.push(tag.to_string());
-                }
-            }
+            crate::domain::use_cases::entry::tag_entry(&mut self.entries, idx, tag);
         }
-        if let Err(e) = self.registry.save() {
+        if let Err(e) = self.registry_store.save(&self.entries) {
             self.set_message(&format!("Save failed: {}", e));
             return;
         }
@@ -1698,11 +1691,9 @@ impl App {
     fn bulk_categorize(&mut self, category: &str) {
         let count = self.multi_selected.len();
         for &idx in &self.multi_selected {
-            if let Some(entry) = self.registry.get_entry_mut(idx) {
-                entry.category = category.to_string();
-            }
+            crate::domain::use_cases::entry::set_category(&mut self.entries, idx, category);
         }
-        if let Err(e) = self.registry.save() {
+        if let Err(e) = self.registry_store.save(&self.entries) {
             self.set_message(&format!("Save failed: {}", e));
             return;
         }
@@ -1713,7 +1704,7 @@ impl App {
 
     fn change_category(&mut self) {
         if let Some(idx) = self.selected_entry {
-            if let Some(entry) = self.registry.get_entry(idx) {
+        if let Some(entry) = self.entries.get(idx) {
                 self.mode = Mode::Dialog;
                 self.dialog = Some(DialogState {
                     path: entry.path.clone(),
@@ -1738,7 +1729,7 @@ impl App {
             return;
         }
         let query = self.search_query.to_lowercase();
-        for (i, entry) in self.registry.entries.iter().enumerate() {
+        for (i, entry) in self.entries.iter().enumerate() {
             if entry.path.to_lowercase().contains(&query)
                 || entry.category.to_lowercase().contains(&query)
                 || entry.description.to_lowercase().contains(&query)

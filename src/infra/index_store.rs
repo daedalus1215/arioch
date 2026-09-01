@@ -169,3 +169,72 @@ fn parse_index_toml(content: &str) -> Vec<Entry> {
 
     entries
 }
+
+// ─── Characterization tests (Phase 0) ──────────────────────────────────────
+// Pin the hand-rolled TOML serialization behavior (escaping on write, no
+// unescaping on read, stable output format) - 1:1 relocation of the registry
+// tests from before the Registry split.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str) -> Entry {
+        Entry {
+            path: path.into(),
+            category: String::new(),
+            tags: Vec::new(),
+            description: String::new(),
+            alias: None,
+            related: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn toml_round_trip_preserves_plain_entries() {
+        let mut e1 = entry("/home/u/.ssh/config");
+        e1.category = "ssh-keys".into();
+        e1.tags = vec!["bastion".into(), "prod".into()];
+        e1.description = "Main ssh config".to_string();
+        let mut e2 = entry("/etc/ssl/server.pem");
+        e2.alias = Some("srv".into());
+        e2.related = vec!["/etc/ssl/ca.pem".into()];
+        let entries = vec![e1, e2, entry("/plain/path")];
+
+        let parsed = parse_index_toml(&to_index_toml(&entries));
+        assert_eq!(parsed, entries);
+    }
+
+    #[test]
+    fn toml_serialization_escapes_but_parsing_never_unescapes() {
+        let mut e = entry("x");
+        e.path = r"C:\dir\file".into();
+        e.description = "line1\nline2\ttab".into();
+        let entries = vec![e];
+
+        let s = to_index_toml(&entries);
+        assert!(s.contains(r#"path = "C:\\dir\\file""#));
+        assert!(s.contains("description = \"line1\\nline2\\ttab\""));
+
+        // parse side keeps the escape sequences literally (no unescaping today)
+        let parsed = parse_index_toml(&s);
+        assert_eq!(parsed[0].path, r"C:\\dir\\file");
+        assert_eq!(parsed[0].description, "line1\\nline2\\ttab");
+    }
+
+    #[test]
+    fn toml_output_format_is_stable() {
+        let mut e = entry("/a/b");
+        e.category = "certs".into();
+        assert_eq!(
+            to_index_toml(std::slice::from_ref(&e)),
+            "# arioch — security file index\n\
+             # Managed by arioch. Safe to edit by hand.\n\
+             \n\
+             [[entry]]\n\
+             path = \"/a/b\"\n\
+             category = \"certs\"\n\
+             \n"
+        );
+    }
+}

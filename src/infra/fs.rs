@@ -45,4 +45,11 @@ impl Filesystem for RealFs {
         let entries = std::fs::read_dir(path)?;
         Ok(entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
     }
+
+    fn is_symlink(&self, path: &Path) -> bool {
+        path
+            .symlink_metadata()
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
+    }
 }

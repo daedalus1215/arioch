@@ -51,3 +51,12 @@ pub struct FileMeta {
     /// Unix permission bits (full `permissions().mode()`; 0 on non-unix).
     pub mode: u32,
 }
+
+/// Scan parameters (pure domain view of the scan settings in `Config`).
+#[derive(Debug, Clone)]
+pub struct ScanConfig {
+    pub scan_paths: Vec<String>,
+    pub exclude_paths: Vec<String>,
+    pub scan_patterns: Vec<String>,
+    pub scan_depth: usize,
+}

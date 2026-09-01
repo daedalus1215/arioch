@@ -10,3 +10,4 @@ pub mod knowledge;
 pub mod ports;
 pub mod rules;
 pub mod value;
+pub mod use_cases;

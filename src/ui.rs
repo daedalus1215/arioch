@@ -85,8 +85,8 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
     )));
     lines.push(Line::from(""));
 
-    let categories = app.registry.categories();
-    let total = app.registry.entries.len();
+    let categories = crate::domain::rules::categories(&app.entries);
+    let total = app.entries.len();
     lines.push(Line::from(Span::styled(
         format!("  {} file(s)", total),
         Style::default().fg(Color::Gray),
@@ -106,7 +106,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
     }
 
     for category in &categories {
-        let indices = app.registry.entries_in_category(category);
+        let indices = crate::domain::rules::entries_in_category(&app.entries, category);
         let cat_style = if let Some(sel) = &app.selected_category {
             if sel == category {
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
@@ -123,7 +123,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
         )));
 
         for &idx in &indices {
-            if let Some(entry) = app.registry.get_entry(idx) {
+            if let Some(entry) = app.entries.get(idx) {
                 let is_selected = app.selected_entry == Some(idx);
                 let is_multi = app.multi_selected.contains(&idx);
 
@@ -170,7 +170,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, app: &App) {
     // Find the line index of the selected entry
     let selected_line = if let Some(sel_idx) = app.selected_entry {
         lines.iter().position(|line| {
-            if let Some(entry) = app.registry.get_entry(sel_idx) {
+            if let Some(entry) = app.entries.get(sel_idx) {
                 line.to_string().contains(&truncate(&entry.path, app.sidebar_width - 4))
             } else {
                 false
@@ -207,7 +207,7 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
     let title = if matches!(app.mode, Mode::Search) {
         format!(" Search: {} ", &app.search_query)
     } else if let Some(idx) = app.selected_entry {
-        if let Some(entry) = app.registry.get_entry(idx) {
+        if let Some(entry) = app.entries.get(idx) {
             if app.mode == Mode::Annotate {
                 format!(" ANNOTATE: {} ", entry.path)
             } else {
@@ -262,7 +262,7 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(""));
 
             for (i, &idx) in app.search_results.iter().take(shown).enumerate() {
-                if let Some(entry) = app.registry.get_entry(idx) {
+                if let Some(entry) = app.entries.get(idx) {
                     let is_selected = app.selected_entry == Some(idx);
                     let marker = if is_selected { "» " } else { "  " };
                     let style = if is_selected {
@@ -309,7 +309,7 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
     }
 
     if let Some(idx) = app.selected_entry {
-        if let Some(entry) = app.registry.get_entry(idx) {
+        if let Some(entry) = app.entries.get(idx) {
             if app.mode == Mode::Annotate {
                 render_annotate_content(f, area, app, entry, block);
                 return;
@@ -523,7 +523,7 @@ fn render_edit(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let title = if let Some(idx) = app.selected_entry {
-        if let Some(entry) = app.registry.get_entry(idx) {
+        if let Some(entry) = app.entries.get(idx) {
             format!(" EDIT: {} ", entry.path)
         } else {
             " EDIT ".into()
@@ -545,7 +545,7 @@ fn render_edit(f: &mut Frame, area: Rect, app: &App) {
     let start = app.scroll_offset.min(total.saturating_sub(visible));
 
     let file_type = if let Some(idx) = app.selected_entry {
-        if let Some(entry) = app.registry.get_entry(idx) {
+        if let Some(entry) = app.entries.get(idx) {
             crate::syntax::detect_type(
                 &entry.path,
                 edit.lines.first().map(|s| s.as_str()).unwrap_or(""),
@@ -634,7 +634,7 @@ fn render_edit(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(paragraph, area);
 }
 
-fn render_annotate_content(f: &mut Frame, area: Rect, app: &App, entry: &crate::registry::Entry, block: Block) {
+fn render_annotate_content(f: &mut Frame, area: Rect, app: &App, entry: &crate::domain::entity::Entry, block: Block) {
     let content = match &app.file_content {
         Some(c) => c,
         None => {
@@ -790,7 +790,7 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if app.registry.entries.is_empty() {
+    if app.entries.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No entries to map.",
             Style::default().fg(Color::DarkGray),
@@ -805,7 +805,6 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
 
     // Build node list with resolved names
     let nodes: Vec<(usize, String, &str)> = app
-        .registry
         .entries
         .iter()
         .enumerate()
@@ -854,7 +853,7 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
 
         // Detail mode: show tags
         if app.map_zoom > 0 {
-            if let Some(entry) = app.registry.get_entry(*idx) {
+            if let Some(entry) = app.entries.get(*idx) {
                 if !entry.tags.is_empty() {
                     lines.push(Line::from(Span::styled(
                         format!("      tags: [{}]", entry.tags.join(", ")),
@@ -865,13 +864,13 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
         }
 
         // Edges (bidirectional-aware)
-        if let Some(entry) = app.registry.get_entry(*idx) {
+        if let Some(entry) = app.entries.get(*idx) {
             for rel in &entry.related {
                 let exists = name_to_idx.contains_key(rel.as_str());
                 if exists {
                     // Check if target also lists us (bidirectional)
                     let target_idx = name_to_idx[rel.as_str()];
-                    let target_entry = &app.registry.entries[target_idx];
+                    let target_entry = &app.entries[target_idx];
                     let target_name = target_entry
                         .alias
                         .as_deref()
@@ -927,7 +926,7 @@ fn render_map(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_suggestions(f: &mut Frame, area: Rect, app: &App) {
-    let total = app.registry.suggestions.len();
+    let total = app.suggestions.len();
     let filter_str = if app.suggestion_filter.is_empty() {
         String::new()
     } else {
@@ -948,7 +947,7 @@ fn render_suggestions(f: &mut Frame, area: Rect, app: &App) {
     // Build filtered rows
     let filter = app.suggestion_filter.to_lowercase();
     let mut all_indices: Vec<usize> = Vec::new();
-    for (i, p) in app.registry.suggestions.iter().enumerate() {
+    for (i, p) in app.suggestions.iter().enumerate() {
         let path = p.to_string_lossy().to_string();
         if !filter.is_empty() && !path.to_lowercase().contains(&filter) {
             continue;
@@ -966,7 +965,7 @@ fn render_suggestions(f: &mut Frame, area: Rect, app: &App) {
 
     let mut rows = Vec::new();
     for &i in &visible {
-        let p = &app.registry.suggestions[i];
+        let p = &app.suggestions[i];
         let path = p.to_string_lossy().to_string();
         let filename: String = p
             .file_name()
@@ -1235,7 +1234,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let entry_info = if let Some(idx) = app.selected_entry {
-        if let Some(entry) = app.registry.get_entry(idx) {
+        if let Some(entry) = app.entries.get(idx) {
             format!(" {}:{} ", idx + 1, entry.path)
         } else {
             " ".into()
@@ -1341,7 +1340,7 @@ fn render_dialog(f: &mut Frame, app: &App) {
             for rel in value.split(',') {
                 let rel = rel.trim();
                 if !rel.is_empty() {
-                    let exists = app.registry.entries.iter().any(|e| {
+                    let exists = app.entries.iter().any(|e| {
                         e.alias.as_deref() == Some(rel)
                             || e.path.rsplit('/').next() == Some(rel)
                     });
