@@ -1,586 +1,214 @@
-# arioch — Feature Specs
+# arioch — Refactor to the Rust Patterns
 
-Each spec is self-contained: implement one, verify, move to next.
-Status: `[ ]` = not started, `[~]` = in progress, `[x]` = done.
+**Status:** spec / ready to implement in a fresh session
+**Pattern reference:** `~/patterns-rust/` (read `design-philosophy.md`, `dependency-hierarchy.md`, `domain/port.md`, `domain/use-case.md` first)
+**Type:** pure refactor — **zero behavior change**
 
 ---
 
-## 1. Add Entry Dialog
+## 0. Goal & non-goals
 
-Status: `[x]`
+**Goal.** Restructure arioch from a flat, coupled single-crate TUI into the *light onion* from `~/patterns-rust/`: a pure, testable `domain/`; all I/O behind **ports**; the `app.rs` + `ui.rs` monoliths split into state-machine / view-models / render. arioch stays a single crate (Option A enforcement from `cross-cutting/crate-graph.md`).
 
-### Goal
-Press `a` opens an inline TUI form to register a new security file without leaving the app.
+**Non-goals (do NOT do these):**
+- No new features, no UI/UX changes, no new CLI flags or env vars.
+- No dependency changes (keep `ratatui`, `crossterm`, `toml`, `shellexpand`, `serde_json`, `parking_lot`, `textwrap`, `glob`).
+- No workspace-crate split (that is Option B — explicitly deferred).
+- No change to the binary name, CLI interface, or on-disk file formats/paths.
 
-### UI Layout
+**Definition of done:**
+- `cargo build` green, `cargo test` green (new domain tests present and passing).
+- TUI runs; all modes behave exactly as before (see §5 invariants).
+- All 9 CLI commands produce byte-identical output to today.
+- The boundary test (§6) passes: `domain/` imports no I/O crate.
+
+---
+
+## 1. Current state (inventory)
+
+8 modules, no `trait`s anywhere, no layering. Violations in bold.
+
+| Module | Lines | Contains | Violation |
+| --- | --- | --- | --- |
+| `main.rs` | 444 | CLI parse, 9 `cmd_*`, `run_tui`, terminal setup; `set_config_override` (the global); dup `expand_path`, `guess_category` | handlers do I/O (`std::fs` in export/import/init); **duplicated helpers** |
+| `app.rs` | 1973 | `Event`, `Mode`, `EditState`, `DialogState`, **42-field `App`**, `impl App` (~40 fns), `edit_*`, `days_to_ymd`, `iso_now`, dup `guess_category`, `expand_path` | **god-object**: input + business + I/O + derived-state in one struct/impl |
+| `ui.rs` | ~1440 | `render` + 17 `render_*`, `truncate`, `human_size`, `expand_path_for_check` (3rd copy); reads `app.registry.entries` directly; `std::fs::metadata` for sizes | **render reads the persistence struct**; I/O in render |
+| `registry.rs` | ~320 | `Entry`, `Registry{entries,suggestions}`; load/save/parse_toml/to_toml_string (store); `scan_with_config`, `categories`, `entries_in_category`, `is_excluded`, `matches_pattern` (business) | **entity + store + use-cases fused** |
+| `knowledge.rs` | 553 | `Danger`, `KnowledgeEntry`, `DetectedKey`, `KnowledgeBase`; `load` (reads user file); `detect`/`detect_ssh`/`detect_keyvalue`/`detect_hosts`/`detect_env` (**core logic**); `builtin_entries` | **data + store + core domain logic fused** |
+| `config.rs` | 225 | `CONFIG_OVERRIDE` global (`LazyLock<Mutex>`), `set_config_override`, `active_config_dir`, `Config`, `CategoryColors`, `config_dir`, `editor()` | **process-global mutable state** |
+| `annotations.rs` | 65 | `Annotation` (+`covers`), `AnnotationsFile` load/save (TOML) | mostly clean; store logic should move to infra |
+| `syntax.rs` | ~400 | `FileType`, `detect_type`, `highlight_*`, `style_*` (ratatui) | pure presentation — stays in the TUI layer |
+
+### I/O call sites that must move behind a port
+All in `app.rs` unless noted:
+- `std::fs::metadata` — `tick` (index mtime, line 162; entry mtime, 206), `refresh_content` (size check, 1403), `enter_edit` (perm check `mode & 0o200`, 895)
+- `std::fs::read_to_string` — `read_history` (278), `handle_suggestions` preview (709), `save_edit` (1079), `refresh_content` (1415)
+- `std::fs::write` — `save_edit` (1091)
+- `std::fs::OpenOptions` append — `log_action` (262, audit log)
+- `std::process::Command` — `open_editor` (1438, `$EDITOR`; **raw-mode dance** around it), `copy_to_clipboard` (1474/1483/1499, `wl-copy`→`xclip`→`xsel`)
+- `knowledge.rs` `load` (42) reads user `knowledge.toml`; `registry.rs` load/save; `annotations.rs` load/save; `main.rs` export/import/init use `std::fs`
+- `ui.rs` `std::fs::metadata` (324) for file sizes
+
+### Duplicated helpers (consolidate into `domain`)
+- `expand_path` — `main.rs:319`, `app.rs:1966`, `ui.rs:1374` (`expand_path_for_check`). → one `domain::rules::expand_path`.
+- `guess_category` — `main.rs:324`, `app.rs:1943`. → one `domain::rules::guess_category`.
+
+---
+
+## 2. Target architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Add Entry                                            │
-├──────────────────────────────────────────────────────┤
-│  Path:      [~/]                                      │
-│  Category:  [ssh-keys          ]                      │
-│  Tags:      [deploy, prod      ]                      │
-│  Desc:      [Primary deploy key]                      │
-│  Alias:     [id_ed25519        ]                      │
-│  Related:   [aws-creds         ]                      │
-├──────────────────────────────────────────────────────┤
-│  Tab: next field  Enter: save  Esc: cancel            │
-└──────────────────────────────────────────────────────┘
+arioch/src/
+  main.rs                     # CLI parse + COMPOSITION ROOT: builds stores/adapters,
+                              #   threads Config/paths (no more global), dispatches cmd_* / run_tui
+  application/
+    cli.rs                    # 9 thin cmd_* — build domain params, call use-cases, format stdout
+    tui/
+      app.rs                  # App: UI state + input handlers; handlers call use-cases/services
+                              #   and the ports. No std::fs / std::process directly.
+      view.rs                 # view-model structs (sidebar rows, map nodes, dialog, status, help)
+      render.rs               # pure: view-models → ratatui widgets (today's ui.rs render_*)
+      syntax.rs               # (moved) ratatui highlighting — pure presentation
+  domain/                     # NO ratatui, NO crossterm, NO std::fs, NO std::process, NO shellexpand
+    mod.rs
+    entity.rs                 # Entry
+    value.rs                  # Danger, DetectedKey, Annotation, FileMeta, ScanConfig
+    ports.rs                  # trait Filesystem, Editor, Clipboard, AuditLog, RegistryStore, AnnotationStore
+    rules.rs                  # guess_category, expand_path, is_excluded, matches_pattern,
+                              #   visual_order, days_to_ymd, iso_now (pure)
+    knowledge.rs              # KnowledgeEntry data + detect/detect_ssh/detect_keyvalue/detect_hosts/detect_env
+                              #   (pure — operates on &[KnowledgeEntry]; load is an adapter, not here)
+    use_cases/
+      mod.rs
+      entry.rs                # upsert_entry, remove_entry, tag_entry, set_category, find_entry (pure on &mut Vec<Entry>)
+      scan.rs                 # scan_for_suggestions(fs, &ScanConfig) -> Vec<PathBuf>  (uses Filesystem port)
+  infra/
+    mod.rs
+    fs.rs                     # impl Filesystem for RealFs (std::fs)
+    process.rs                # impl Editor for ShellEditor; impl Clipboard for Wl/Xclip/Xsel
+    index_store.rs            # impl RegistryStore for TomlIndex (save/load + to_toml_string/parse_toml)
+    annotations_store.rs      # impl AnnotationStore for TomlAnnotations
+    audit_log.rs              # impl AuditLog for FileAuditLog (append + recent)
+    config.rs                 # fn load_config(path) -> Config  (reads config.toml; called at the root)
 ```
 
-### Behavior
-- **Path** — first field, pre-filled with `~/`. Tab or Enter to confirm.
-  - If path exists on disk, auto-detect category from path heuristics (same `guess_category` logic).
-  - If path doesn't exist, allow it but show a warning indicator.
-- **Category** — text field. Tab to advance.
-- **Tags** — comma-separated. Tab to advance.
-- **Description** — single-line text. Tab to advance.
-- **Alias** — optional. Tab to advance.
-- **Related** — comma-separated aliases/paths of existing entries. Tab to advance.
-  - Show hint if related entry not found: `Related: [aws-creds (missing)]`
-- **Enter** on any field — save entry, close dialog, refresh sidebar.
-- **Esc** — cancel, no changes saved.
-- **Backspace** — delete character in current field.
-- **Tab** — advance to next field. Shift+Tab — go back.
-
-### Data
-- New entry appended to `registry.entries`.
-- Saved immediately to `index.toml`.
-- `selected_entry` set to the new entry's index.
-- Content loaded via `refresh_content()`.
-
-### Edge Cases
-- Duplicate path: if an entry with same path exists, update it instead of adding (show "Updated" in status).
-- Empty path: reject with status message "Path is required".
-- Very long path: truncate display in sidebar (already handled by `truncate()`).
-
-### Acceptance
-- `a` → dialog appears, all fields navigable with Tab/Shift+Tab
-- Enter a valid path + category → entry appears in sidebar, saved to TOML
-- Esc → dialog closes, no entry added
-- Enter a path that already exists → existing entry updated, status shows "Updated"
-- Enter a related alias that doesn't exist → entry still saved, map view shows red arrow
+**The one hard rule:** `domain/` imports only `std`, `chrono`-free values, and its own items. It is checked by the boundary test (§6). Everything I/O-shaped is a `trait` in `domain/ports.rs`, implemented in `infra/`, bound once in `main.rs` / `tui::run()`.
 
 ---
 
-## 2. Change Entry Fields (Edit Dialog)
+## 3. The ports (the contract)
 
-Status: `[x]`
+Signatures are the load-bearing part — implement against exactly these.
 
-### Goal
+```rust
+// domain/value.rs
+#[derive(Debug, Clone)]
+pub struct FileMeta { pub len: u64, pub modified: std::time::SystemTime, pub mode: u32 } // mode = unix perm bits
 
-### UI Layout
-Same as Add Entry dialog, but:
-- Title: `Edit Entry: <alias or filename>`
-- All fields pre-populated from current entry
-- Enter → save changes, close dialog
-- Esc → discard changes, close dialog
-- `d` key in dialog → delete entry (replaces the top-level `d` behavior)
+// domain/ports.rs
+pub trait Filesystem: Send + Sync {
+    fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String>;
+    fn write(&self, path: &std::path::Path, contents: &str) -> std::io::Result<()>;
+    fn metadata(&self, path: &std::path::Path) -> std::io::Result<FileMeta>;
+    fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()>;
+    fn exists(&self, path: &std::path::Path) -> bool;
+    fn read_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>>;
+}
 
-### Behavior
-- Same field navigation as Add Entry.
-- On save: update entry in place (not append), save to TOML, refresh content.
-- On delete (`d`): remove entry, confirm with status message, close dialog.
-- If path field is changed: re-load file content for the new path.
+pub trait Editor: Send + Sync {
+    /// Launch the user's editor on `path`, blocking until exit.
+    /// The TUI disables raw mode before and re-enables after — this port only spawns the process.
+    fn launch(&self, path: &std::path::Path) -> std::io::Result<()>;
+}
 
-### Acceptance
-- `c` → dialog pre-filled with selected entry's values
-- Change category → save → sidebar updates category grouping
-- Change path → save → main panel loads new file content
-- `d` in dialog → entry removed, saved to TOML
-- Esc → no changes made
+pub trait Clipboard: Send + Sync {
+    /// Copy `text`; returns true if a backend (wl-copy/xclip/xsel) succeeded.
+    fn copy(&self, text: &str) -> bool;
+}
 
----
+pub trait AuditLog: Send + Sync {
+    fn append(&self, action: &str, path: &str, details: &str) -> std::io::Result<()>;
+    fn recent(&self, n: usize) -> Vec<String>;   // same order/format as today's read_history
+}
 
-## 3. File Type Detection & Syntax Coloring
+pub trait RegistryStore: Send + Sync {
+    fn load(&self) -> std::io::Result<Vec<entity::Entry>>;
+    fn save(&self, entries: &[entity::Entry]) -> std::io::Result<()>;   // TOML, byte-identical to today
+}
 
-Status: `[x]`
-
-### Goal
-Auto-detect file type from extension/content and apply basic syntax highlighting in the viewer.
-
-### Supported Types & Color Rules
-
-| Type | Extensions | Colors |
-|------|-----------|--------|
-| TOML | `.toml`, `.cfg`, `Cargo.toml` | Keys: Cyan, Strings: Green, Comments: Gray, Booleans: Yellow, Numbers: Magenta |
-| JSON | `.json` | Keys: Cyan, Strings: Green, Numbers: Magenta, Booleans/Null: Yellow, Comments: N/A |
-| YAML | `.yaml`, `.yml` | Keys: Cyan, Strings: Green, Comments: Gray, Anchors: Magenta |
-| INI/Config | `.conf`, `.ini`, `ssh_config`, `known_hosts` | Sections: Green, Keys: Cyan, Values: Reset, Comments: Gray |
-| SSH | `id_*`, `authorized_keys`, `known_hosts`, `config` (in ~/.ssh) | Same as INI |
-| Env | `.env`, `*.env` | Keys: Cyan, Values: Green, Comments: Gray, `export`: Magenta |
-| PEM/Cert | `.pem`, `.crt`, `.key`, `.p12` | `-----BEGIN/END`: Green bold, Base64: DarkGray |
-| Shell | `.sh`, `.bash` | Comments: Gray, Keywords (if/for/while/function): Magenta, Strings: Green, `$VAR`: Yellow |
-| Plain text | Everything else | No highlighting |
-
-### Detection Logic
-1. Check extension (lowercase) against known set.
-2. If extension matches multiple (e.g., `config`), check parent directory (`~/.ssh/config` → SSH, `~/.config/app/config` → INI).
-3. If no extension match, check first line for `-----BEGIN` → PEM.
-4. Fallback: no highlighting.
-
-### Implementation
-- New module: `src/syntax.rs`
-- Function: `highlight_line(line: &str, file_type: FileType) -> Vec<Span>`
-- In `render_main()`: after reading file content, detect type, then render each line via `highlight_line`.
-- Only highlight the visible window (not the whole file).
-
-### Acceptance
-- Open a TOML file → keys in cyan, strings in green, comments in gray
-- Open a `.pem` file → BEGIN/END markers green bold, base64 in gray
-- Open a `.env` file → keys in cyan, values in green, `export` in magenta
-- Open a plain `.txt` → no highlighting (default color)
-- Open `~/.ssh/config` → INI-style highlighting
-
----
-
-## 4. Extended Map View
-
-Status: `[x]`
-
-### Goal
-Improve the relationship map from a flat list to a proper ASCII graph with spatial layout.
-
-### UI Layout
-
-```
-┌─ Relationship Map ────────────────────────────────────┐
-│                                                       │
-│   [id_ed25519] ──────► [ssh-config]                   │
-│        │                   │                           │
-│        │                   ▼                           │
-│        │             [known_hosts]                      │
-│        ▼                                               │
-│   [aws-creds] ─────────► [hosts]                       │
-│                                                       │
-│   Legend:  ──► exists    ┄┄► missing                   │
-│   Filter:  all  [ssh-keys]  [cloud-creds]              │
-│                                                       │
-│   Press [1-9] to highlight a node, [0] to clear       │
-│   Press [f] to filter by category                     │
-└───────────────────────────────────────────────────────┘
+pub trait AnnotationStore: Send + Sync {
+    fn load(&self) -> Vec<value::Annotation>;
+    fn save(&self, annotations: &[value::Annotation]) -> std::io::Result<()>;
+}
 ```
 
-### Behavior
-- **Layout**: Simple topological sort. Nodes with no incoming edges on top, edges flow downward. Max 3 columns.
-- **Node format**: `[alias]` or `[filename]`, colored by category:
-  - ssh-keys: Cyan
-  - cloud-creds: Magenta
-  - system-config: Green
-  - certificates: Yellow
-  - other: Reset
-- **Edges**: `───►` for existing targets, `┄┄┄►` (dashed) for missing.
-- **Highlight**: Press `1`-`9` to highlight node N (bold + border). Press `0` to clear.
-- **Filter**: Press `f` to cycle through categories, showing only that category's nodes + their connections.
-- **Missing nodes**: Shown in parentheses, red.
-- **Self-loops**: Shown as `[node] ──► [node] (self)` on same line.
-- **Cycles**: Detected and shown with `↻` suffix on the node.
-
-### Data
-- Build directed graph from `related` fields.
-- Topological sort (Kahn's algorithm). Cycles handled by breaking them.
-- Layout: BFS from roots, assign (row, col) positions.
-
-### Acceptance
-- 3+ entries with `related` links → rendered as a graph with proper node/edge positions
-- Press `1` → first node highlighted
-- Press `f` → filter to ssh-keys only, other nodes hidden
-- Press `0` → clear highlight
-- A node with a missing `related` target → dashed edge, target shown in red
-- A cycle (A→B→A) → `↻` shown on both nodes, no infinite loop
+- **`Config`** is a domain *value* (not a port). It is loaded once at the composition root via `infra::config::load_config(path)` and threaded through `App` and the CLI. `CategoryColors`, `editor()`, `config_dir()` logic stays but is called at the root, not via a global.
+- **Fakes for tests** (per `cross-cutting/testing.md`): `MemFs` (HashMap-backed), `NoopEditor`, `VecClipboard`, `MemAuditLog`, `MemRegistryStore`, `MemAnnotationStore`. Co-locate in `infra/mem.rs` or `#[cfg(test)]`.
 
 ---
 
-## 5. Scan Results Navigation & Filter
+## 4. Migration plan (each phase ends green: builds + TUI + CLI work)
 
-Status: `[x]`
+> Guardrail for every phase: after the change, `cargo build` is clean **and** the TUI still runs and the touched CLI command still behaves. Do not stack red phases.
 
-### Goal
-The scan suggestions view gets proper keyboard navigation, filtering, and bulk operations.
+**Phase 0 — Baseline & characterization tests.**
+- Confirm `cargo build`/`cargo check` green; note the current warning count. Smoke-run the TUI and every CLI command; save sample outputs (these are the behavior spec).
+- Add characterization tests for the logic that is about to move, *as it exists today* (extract minimally if needed to reach it): `detect_ssh`/`detect_keyvalue`/`detect_hosts`/`detect_env`, `guess_category`, `is_excluded`/`matches_pattern`, `days_to_ymd`, TOML round-trip (`to_toml_string`→`parse_toml`). **Done when:** these tests pass against the current behavior.
 
-### Current State
-- `s` triggers scan, shows a table of suggestions.
-- `a` accepts all, `i` accepts first, `q`/`Esc` closes.
+**Phase 1 — Extract pure `domain` (no I/O).**
+- Create `domain/{mod,entity,value,rules,knowledge}.rs`. Move `Entry`; `Danger`/`DetectedKey`/`Annotation`/`FileMeta`/`ScanConfig`; `guess_category`, `expand_path`, `is_excluded`, `matches_pattern`, `visual_order`, `days_to_ymd`, `iso_now` into `rules`; the `detect_*` fns into `knowledge` operating on `&[KnowledgeEntry]` (drop the file-read from `load` — it becomes an adapter later).
+- Point Phase-0 tests at the new `domain` locations. **Done when:** `domain/` compiles with no I/O imports; tests pass.
 
-### Improved Behavior
-- **Navigation**: `j`/`k` or arrow keys to move through suggestions. Selected row highlighted.
-- **Filter**: Type to filter suggestions by path substring (like search mode).
-- **Accept selected**: `a` accepts the *selected* row (not all). `A` (shift) accepts all.
-- **Reject**: `d` removes selected from suggestions (hide it).
-- **Preview**: Enter or `e` opens the selected file in the viewer (read-only, no add).
-- **Status bar**: Shows `n/total` suggestions, `m` accepted, `k` rejected.
-- **Re-scan**: `r` re-runs scan (in case files changed).
+**Phase 2 — Ports + infra adapters (additive).**
+- Write `domain/ports.rs` (§3) and the `infra/` impls, moving the existing `std::fs`/`Command`/TOML code **verbatim** into them. Nothing consumes them yet. **Done when:** compiles; adapters are 1:1 moves of current behavior.
 
-### UI
+**Phase 3 — Route `App` I/O through ports.**
+- Give `App` fields for the ports (`fs`, `editor`, `clipboard`, `audit`, `registry_store`, `annotation_store`) + a `Config`, built in `tui::run()` (composition root). Replace every direct I/O call in `app.rs` with a port call. Preserve the editor raw-mode dance and the `wl→xclip→xsel` fallback order. **Done when:** `app.rs` has zero `std::fs`/`std::process`; TUI identical.
 
-Status: `[x]`
-┌─ Scan Suggestions (23 found, 2 accepted) ─────────────┐
-│  Filter: [ssh]                                         │
-├────────────────────────────────────────────────────────┤
-│  » ~/.ssh/id_ed25519.pub                               │
-│    ~/.ssh/known_hosts                                  │
-│    ~/.ssh/config                                       │
-│    /etc/ssh/sshd_config                                │
-│    ~/.ssh/id_rsa                                       │
-├────────────────────────────────────────────────────────┤
-│  j/k:navigate  a:accept  A:all  d:reject  e:preview   │
-│  /:filter  r:rescan  q:quit                            │
-└────────────────────────────────────────────────────────┘
-```
+**Phase 4 — Split `Registry`.**
+- `Entry` → `domain::entity`. TOML load/save → `infra::index_store` (`RegistryStore`). `scan_with_config` → `domain::use_cases::scan::scan_for_suggestions(fs, &ScanConfig)` (walking via `Filesystem::read_dir`; filtering via `rules`). `add_entry`/`remove_entry`/`tag`/`set_category` → pure use-cases in `domain::use_cases::entry`. `App` holds `entries: Vec<Entry>` + `suggestions: Vec<PathBuf>` and calls `registry_store.save(&entries)` after mutations (mirrors today's mutate-then-save). **Done when:** `registry.rs` is deleted; `cli.rs` + TUI use the use-cases + store port.
 
-### Acceptance
-- `s` → scan runs, suggestions appear with first row selected
-- `j`/`k` → move selection up/down
-- Type `ssh` → filter narrows to ssh-related suggestions
-- `a` → accepts selected, it disappears from list, count updates
-- `A` → accepts all, view closes
-- `d` → rejects selected, it's hidden
-- `e` → opens selected file in main viewer (temporarily, `q` returns to scan)
-- `r` → re-scans, refreshes list
-- Filter cleared (Esc or backspace to empty) → all suggestions shown
+**Phase 5 — Kill the global `CONFIG_OVERRIDE`.**
+- `main.rs` reads `--config`, resolves the path once, builds `Config` + paths, and passes them into `cmd_*` and `run_tui`. Delete `config::set_config_override`/`active_config_dir`/the `LazyLock<Mutex>`. **Done when:** no `static`/global in `config.rs`; `--config` still works.
+
+**Phase 6 — Split `ui.rs` → `view.rs` + `render.rs`.**
+- View-model structs in `view.rs` (built from `App` state / domain projections by converters in `app.rs`). `render.rs` fns take view-models, **not** `&App`/`&Registry`. Move file-size `metadata` reads out of render (compute in the handler, pass the value in). **Done when:** `render.rs` never touches `App` fields or I/O.
+
+**Phase 7 — Partition `impl App`.**
+- Keep `Mode`/`EditState`/`DialogState` + UI state in `App`. Input `handle_*` fns become thin: translate a key → call a use-case/service → update state → set a `message`. Consolidate the 3× `expand_path` / 2× `guess_category` onto `domain::rules`. **Done when:** no `handle_*` fn performs I/O or a business mutation inline.
+
+**Phase 8 — Boundary test.**
+- Add `tests/boundaries.rs` (crate-graph Option A): walk `src/domain`, assert no `std::fs`, `std::process`, `ratatui`, `crossterm`, `shellexpand`, and no concrete `infra` type name. **Done when:** it passes.
+
+**Phase 9 — Full verification.**
+- `cargo build` (0 errors), `cargo test` (all green), `cargo clippy` (no new warnings). Re-run the Phase-0 saved outputs and diff — CLI must be byte-identical. Drive the TUI through every mode. **Done when:** all §5 invariants hold and §6 acceptance passes.
 
 ---
 
-## 6. Multi-Selection & Bulk Operations
+## 5. Invariants (behavior must NOT change)
 
-Status: `[x]`
+- **CLI:** all 9 commands (`list add remove tag map scan init export import`) emit identical stdout/JSON shapes; exit codes unchanged; `--config` and `--json` behave as before.
+- **TUI:** every mode (View, Map, Search, Suggestions, Edit, Annotate, AnnotView, Investigate, Dialog) and every keybinding behaves identically; the editor launch still disables/re-enables raw mode around `$EDITOR`; clipboard still tries `wl-copy`→`xclip`→`xsel`.
+- **Files:** `config.toml`, `index.toml`, `annotations.toml`, the audit log, and the user `knowledge.toml` keep identical paths and formats; `index.toml` stays byte-identical on save.
+- **No new** env vars, CLI flags, or dependencies.
 
-### Goal
-Select multiple entries and perform bulk operations (tag, categorize, remove).
+## 6. Acceptance criteria & verification
 
-### Behavior
-- **Toggle select**: `Space` toggles selection on the current entry.
-- **Select all**: `Ctrl+A` selects all entries.
-- **Select category**: In sidebar, `Shift+Enter` selects all entries in the current category.
-- **Deselect all**: `Esc` clears multi-selection.
-- **Bulk remove**: `D` (shift) removes all selected (with confirm: "Remove N entries? y/n").
+- `cargo build` — 0 errors.
+- `cargo test` — all pass; Phase-0 characterization tests present and green.
+- **Boundary test passes:** `src/domain/**` contains none of `std::fs`, `std::process`, `ratatui`, `crossterm`, `shellexpand`, and no `infra::` type.
+- **Structural:** `App` field count reduced (persistence/derived state partitioned); `impl App` contains no `std::fs`/`std::process`; `registry.rs` and the `CONFIG_OVERRIDE` global are gone; exactly one `expand_path` and one `guess_category` remain (in `domain::rules`).
+- **Smoke:** TUI runs and all modes work; each CLI command matches the saved Phase-0 output.
 
-### UI
-- Selected entries in sidebar: `»` becomes `■` (filled square).
-- Status bar shows: `N selected | j/k:navigate  Space:toggle  t:tag  C:categorize  D:remove`
-- Confirmation for destructive ops: status bar shows prompt, `y`/`n` to confirm/cancel.
+## 7. Risks & guardrails
 
-### Acceptance
-- `Space` on entry → `»` becomes `■` in sidebar
-- `Space` on two entries → both highlighted
-- `t` → status bar shows "Add tag to 2 entries: [input]"
-- Type `production` + Enter → both entries get the tag, saved to TOML
-- `C` → status bar shows "Set category for 2 entries: [input]"
-- `D` → "Remove 2 entries? y/n" → `y` → entries removed
-- `Esc` → clears selection, normal navigation resumes
+- **`app.rs` (1973 lines) is the biggest risk.** Change one `handle_*`/operation at a time; keep the TUI running after each. Prefer Phase 3 (I/O→ports) before Phase 7 (impl partition) so behavior is stable first.
+- **The `detect_*` and scan logic is the product's core** — Phase-0 characterization tests are the safety net; do not "improve" them, only relocate.
+- **Preserve exact side-effect ordering** in the editor raw-mode dance and the audit-log append (format + ordering).
+- **Do not reach for a workspace split** — single crate + boundary test is the agreed scope (Option A).
+- If a phase goes red and resists, revert that phase and split it further rather than carrying red into the next phase.
 
----
+## 8. Out of scope / follow-ups
 
-## 7. File Watch & Auto-Refresh
-
-Status: `[x]`
-
-### Goal
-Detect when a file changes on disk and auto-refresh the viewer.
-
-### Behavior
-- Poll the currently-viewed file's modification time every 2 seconds (simple, no `notify` crate).
-- If mtime changed: re-read content, reset scroll offset, flash status: "File updated: <path>".
-- If file was deleted: show error state: "File no longer exists: <path>".
-- If file content exceeds 1MB: show first 1MB with warning.
-- Ctrl+R: force refresh regardless of mtime.
-
-### Implementation
-- In the tick handler: if `mode == View` and `selected_entry` is set, check mtime.
-- Store last-seen mtime in `App` state.
-- Use `std::fs::metadata().modified()` for the check.
-
-### Acceptance
-- Open a file, `nano` the file externally, save → arioch auto-refreshes within 2s
-- Delete the file → status shows "File no longer exists"
-- Restore the file → auto-refresh shows content again
-- Ctrl+R → forces re-read even if mtime unchanged
-
----
-
-## 8. Entry History & Audit Log
-
-Status: `[ ]`
-
-### Goal
-Status: `[x]`
-
-### Storage
-- `~/.config/arioch/history.log` — append-only text file.
-- Format: `<ISO8601 timestamp> <action> <path> <details>`
-- Actions: `add`, `remove`, `edit`, `scan`, `bulk-tag`, `bulk-categorize`
-
-### Behavior
-- Every mutation to the registry appends a line to the log.
-- `h` (in view mode) → shows the last 20 log entries in the main panel (replaces file view temporarily).
-- `q` or `Esc` → returns to normal view.
-- Log is not editable via the TUI (view only).
-
-### Example Log
-```
-2026-08-26T14:32:01Z add ~/.ssh/id_ed25519 category=ssh-keys tags=[deploy,production]
-2026-08-26T14:32:15Z add ~/.ssh/config category=ssh-keys
-2026-08-26T14:33:02Z edit ~/.ssh/id_ed25519 related=[aws-creds,known_hosts]
-2026-08-26T14:33:45Z scan 23 suggestions found, 3 accepted
-2026-08-26T14:34:10Z remove /etc/shadow reason=user-requested
-```
-
-### Acceptance
-- Add an entry → line appended to history.log
-- Remove an entry → line appended with action=remove
-- Press `h` → last 20 entries shown in main panel
-- Press `q` → returns to file view
-- Log file is append-only (never truncated by arioch)
-
----
-
-## 9. CLI Subcommands
-
-Status: `[x]`
-
-### Goal
-Non-interactive CLI operations for scripting and automation.
-
-### Commands
-
-```
-arioch                        # Launch TUI (default)
-arioch list                   # List all entries (path, category, tags)
-arioch list --category SSH    # Filter by category
-arioch list --json            # Output as JSON
-arioch add <path> [--category C] [--tags t1,t2] [--alias A] [--related r1,r2]
-arioch remove <path>
-arioch scan                   # Run scan, print suggestions
-arioch scan --accept          # Accept all suggestions
-arioch info <path>            # Show metadata for a single entry
-arioch map                    # Print ASCII map to stdout
-arioch map --missing          # Only show entries with missing related refs
-arioch path <alias>           # Resolve alias to full path
-arioch version                # Print version
-```
-
-### Behavior
-- All commands operate on the same `~/.config/arioch/index.toml`.
-- `add` with existing path → updates (idempotent).
-- `remove` prints confirmation to stdout (no prompt, for scripting).
-- `map` outputs the same ASCII graph as the TUI.
-- `--json` flag for machine-readable output.
-- Exit codes: 0 success, 1 not found, 2 invalid args.
-
-### Acceptance
-- `arioch list` → prints all entries with path, category, tags
-- `arioch list --category ssh-keys` → filtered output
-- `arioch add ~/.ssh/id_ed25519 --category ssh-keys --tags deploy` → adds entry
-- `arioch add ~/.ssh/id_ed25519 --category ssh-keys` (again) → updates, no duplicate
-- `arioch remove ~/.ssh/id_ed25519` → removes, prints confirmation
-- `arioch info ~/.ssh/id_ed25519` → prints all metadata
-- `arioch path id_ed25519` → prints `/home/user/.ssh/id_ed25519`
-- `arioch list --json` → valid JSON array
-- `arioch map` → ASCII graph in stdout
-
----
-
-## 10. Configuration File
-
-Status: `[x]`
-
-### Goal
-Move hardcoded defaults to a user-editable config.
-
-### File
-`~/.config/arioch/config.toml`
-
-```toml
-# Scan paths to search for security files
-scan_paths = [
-    "~/.ssh",
-    "~/.config",
-    "/etc/ssh",
-    "/etc/ssl",
-    "~/.gnupg",
-    "~/.aws",
-    "~/.kube",
-    "~/.docker",
-]
-
-# Glob patterns for file matching
-scan_patterns = [
-    "*.pub",
-    "id_*",
-    "known_hosts",
-    "*.pem",
-    "*.crt",
-    "*.key",
-    "*.p12",
-    "*.pfx",
-    "*.conf",
-    "*.toml",
-    "*.yaml",
-    "*.yml",
-    "*.json",
-    "hosts",
-    "shadow",
-    "sudoers",
-    "*.env",
-    ".env*",
-    "*.secret",
-    "*.credentials",
-]
-
-# Max directory depth for scanning
-scan_depth = 5
-
-# Max file size to display (bytes, default 1MB)
-max_file_size = 1048576
-
-# Auto-refresh poll interval (seconds, 0 = disabled)
-refresh_interval = 2
-
-# Default editor (overrides $EDITOR)
-# editor = "vim"
-
-# Category color overrides
-[colors]
-ssh-keys = "cyan"
-cloud-creds = "magenta"
-system-config = "green"
-certificates = "yellow"
-```
-
-### Behavior
-- If config file doesn't exist, use built-in defaults (current behavior).
-- If config file exists, parse and merge with defaults.
-- Invalid config → warning to stderr, use defaults.
-- `editor` field overrides `$EDITOR` env var.
-- `scan_depth` replaces the hardcoded `5` in `walkdir_simple`.
-- `max_file_size` caps file content loading.
-- `refresh_interval` controls the poll timer (0 = disabled).
-- `colors` table maps category names to color names.
-
-### Acceptance
-- No config file → uses defaults (current behavior)
-- Create config with custom `scan_paths` → scan only searches those paths
-- Set `editor = "vim"` → pressing `e` opens vim instead of `$EDITOR`
-- Set `refresh_interval = 0` → no auto-refresh
-- Invalid TOML in config → warning, defaults used
-- Set `colors.ssh-keys = "yellow"` → ssh-keys entries render in yellow
-
----
-
-## 11. Inline File Editing
-
-Status: `[x]`
-
-### Goal
-
-Edit file content directly inside the TUI without launching `$EDITOR`. A vim-lite inline editor covers small, surgical edits (rotating a key path, fixing a value) with a safe save flow.
-
-### Entry
-
-- Press `E` (shift) in view mode with file content loaded → enter inline edit mode.
-- Guards (status message, no mode change):
-  - No content loaded / read error → "Cannot edit: no content loaded — press 'r' to refresh"
-  - File not writable (permission bits) → "File is read-only (mode 0oNNN) — use external editor (e)"
-
-### Edit Mode Keys
-
-| Key | Action |
-|-----|--------|
-| `h/j/k/l`, arrows | Move cursor (line/char) |
-| `i` | Insert before cursor |
-| `a` | Insert after cursor |
-| `A` | Insert at end of line |
-| `0` / `$` | Line start / line end |
-| `Backspace` | Delete char before cursor (merges with previous line at start) |
-| `Delete` | Delete char under cursor (merges with next line at end) |
-| `x` | Delete char under cursor |
-| `Enter` | Split line at cursor |
-| `o` / `O` | New line below / above, enter insert |
-| `PgUp` / `PgDn` | Move cursor a page |
-| `s` | Save to disk and exit |
-| `Esc` | In insert mode: exit insert mode. In normal mode: if dirty, prompt `y` save / `n` discard / `Esc` keep editing; if clean, exit |
-| `q` | Same as `Esc` in normal mode (save prompt or exit). In insert mode, types a literal `q` |
-- In insert mode every printable key is text (vim-faithful); command keys like `i`, `a`, `s` are characters.
-
-- Insert mode shows `INSERT` in the status bar (green); normal shows `EDIT`.
-- Cursor position shown as `Ln N Col M`.
-- `Esc` on a clean buffer exits immediately.
-
-### Data
-
-- Edit buffer is an in-memory clone of `file_content` (lines + trailing-newline flag).
-- On save: write file, update `file_content` and `baseline_content` (diff view reflects pre-edit state), append `edit <path> inline` to history log.
-- On discard: reload file from disk, message "Changes discarded".
-- Save failure (permissions) → status error, stay in view mode, buffer kept in `file_content` (diff view `d` shows what would be written).
-
-### Acceptance
-
-- `E` → cursor visible on first line, status shows `EDIT` and `Ln 1 Col 1`
-- `i` → `INSERT`, typed chars appear at cursor
-- `s` → file on disk updated, status "Saved", diff view (`d`) shows no changes
-- `Esc` with unsaved changes → prompt; `n` → file unchanged on disk, content reloaded
-- `Esc` with no changes → exits immediately
-- Read-only file → `E` shows mode message, stays in view
-- Edit a `.toml` entry → syntax highlighting preserved in edit mode
-
----
-
-## 12. Inline Annotations (Plannotator-style)
-
-Status: `[x]`
-
-### Goal
-
-Select a range of lines in the file viewer and attach a persistent comment — the "Herdr Annotate" effect: highlight the selected lines, open a small comment popover next to them, save the note. Gutter markers show annotated lines; jump and review notes without leaving the viewer.
-
-### Storage
-
-`~/.config/arioch/annotations.toml` (respects `--config`):
-[[annotations]]
-path = "~/.ssh/config"
-start = 12
-end = 14
-text = "Rotate this key quarterly"
-created = "2026-08-29T10:00:00Z"
-```
-
-- Line numbers are 1-based, inclusive.
-- Keyed by the entry's registered path string (gutter matches it against the entry, not the disk path).
-
-### Keys (view mode)
-
-| Key | Action |
-|-----|--------|
-| `↑` / `↓` | Move the line cursor (file switching stays on `j`/`k`) |
-| `v` | Start selection at the line cursor |
-| `j/k`, `↑/↓` (in selection) | Extend selection |
-| `c` (in selection) | Open comment popover |
-| `Esc` (in selection) | Cancel selection |
-| `g` | Jump to next annotation (wraps), scrolls to it |
-| `A` | View annotation at line cursor (read-only popover) |
-| `d` (in annotation popover) | Delete that annotation |
-
-### UI
-
-- Selected lines: full-line background highlight + `▌` gutter marker (like the video).
-- Popover: small bordered box anchored near the selection (right of center, clamped in bounds): title `Annotate lines X–Y`, single-line text input, `Enter:save  Esc:cancel`.
-- Annotation view popover: title `Annotation L X–Y`, wrapped text body, `Esc:close  d:delete`.
-- Gutter: `●` (yellow) on any line covered by an annotation, in view, edit, and selection modes.
-- Status bar in selection: `lines X–Y selected | c:comment  Esc:cancel`.
-
-### Data
-
-- Save appends the annotation, persists immediately, status "Annotated lines X–Y".
-- Delete removes it, persists, status "Annotation removed".
-- Audit: `annotate <path> lines=X-Y` / `unannotate <path> lines=X-Y` in history log.
-- Empty comment text → popover stays open.
-
-### Acceptance
-
-- `v` then `j j j` then `c` → 4 lines highlighted, popover appears
-- Type text + Enter → `annotations.toml` contains the range, status confirms
-- Re-open the file → `●` gutter markers on the annotated lines
-- `g` → scrolls to the annotation; `A` on that line → popover shows the text
-- `d` in popover → annotation removed from file, status confirms
-- `Esc` in selection → highlight cleared, back to view
+- Workspace-crate split (crate-graph Option B) — when a second consumer of `domain` appears or `domain` passes ~6 modules.
+- Any feature work, UI redesign, or the matching enoch refactor (separate spec).
