@@ -2,27 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// A persistent inline comment attached to a line range of a registered file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Annotation {
-    /// Registered entry path (as stored in index.toml, may contain `~`).
-    pub path: String,
-    /// First covered line, 1-based, inclusive.
-    pub start: usize,
-    /// Last covered line, 1-based, inclusive.
-    pub end: usize,
-    /// Comment text.
-    pub text: String,
-    /// Creation timestamp (ISO8601 UTC).
-    pub created: String,
-}
-
-impl Annotation {
-    /// Returns true if `line` (1-based) falls within this annotation's range.
-    pub fn covers(&self, line: usize) -> bool {
-        line >= self.start && line <= self.end
-    }
-}
+pub use crate::domain::value::Annotation;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AnnotationsFile {

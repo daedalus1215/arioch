@@ -1,4 +1,5 @@
-use crate::app::{days_to_ymd, App, Mode};
+use crate::app::{App, Mode};
+use crate::domain::rules::days_to_ymd;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -320,7 +321,7 @@ fn render_main(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Cyan),
             )));
             // File metadata
-            let meta_path = expand_path_for_check(&entry.path);
+            let meta_path = crate::domain::rules::expand_path(&entry.path);
             if let Ok(meta) = std::fs::metadata(&meta_path) {
                 let size = human_size(meta.len());
                 let mtime = meta
@@ -1331,7 +1332,7 @@ fn render_dialog(f: &mut Frame, app: &App) {
         // Check for warnings
         let warning = String::new();
         if i == 0 && !value.is_empty() {
-            let path = expand_path_for_check(value);
+            let path = crate::domain::rules::expand_path(value);
             if !std::path::Path::new(&path).exists() {
                 let _ = &warning; // suppress unused warning
             }
@@ -1368,15 +1369,6 @@ fn render_dialog(f: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, dialog_area);
-}
-
-fn expand_path_for_check(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, rest);
-        }
-    }
-    path.to_string()
 }
 
 fn render_help(f: &mut Frame, _app: &App) {

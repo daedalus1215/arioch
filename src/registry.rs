@@ -1,24 +1,9 @@
 use anyhow::{Context, Result};
-use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Entry {
-    pub path: String,
-    #[serde(default)]
-    pub category: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub related: Vec<String>,
-}
-
+pub use crate::domain::entity::Entry;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registry {
@@ -91,24 +76,11 @@ impl Registry {
     }
 
     pub fn categories(&self) -> Vec<String> {
-        let mut cats: Vec<String> = self
-            .entries
-            .iter()
-            .map(|e| e.category.clone())
-            .filter(|c| !c.is_empty())
-            .collect();
-        cats.sort();
-        cats.dedup();
-        cats
+        crate::domain::rules::categories(&self.entries)
     }
 
     pub fn entries_in_category(&self, category: &str) -> Vec<usize> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.category == category)
-            .map(|(i, _)| i)
-            .collect()
+        crate::domain::rules::entries_in_category(&self.entries, category)
     }
 
     pub fn scan_with_config(
@@ -155,21 +127,11 @@ impl Registry {
     }
 
     fn is_excluded(&self, path: &Path, excludes: &[String]) -> bool {
-        let path_str = path.to_string_lossy();
-        excludes.iter().any(|ex| path_str.starts_with(ex.as_str()))
+        crate::domain::rules::is_excluded(path, excludes)
     }
 
     fn matches_pattern_with_config(&self, path: &Path, patterns: &[String]) -> bool {
-        if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-            for pattern_str in patterns {
-                if let Ok(pattern) = Pattern::new(pattern_str) {
-                    if pattern.matches(filename) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        crate::domain::rules::matches_pattern(path, patterns)
     }
 
     fn to_toml_string(&self) -> Result<String> {
@@ -348,27 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn is_excluded_is_bare_string_prefix_match() {
-        let reg = Registry::empty();
-        let excludes = vec!["/etc/ssl".to_string(), "/home/u/.config/git".to_string()];
-        assert!(reg.is_excluded(Path::new("/etc/ssl/certs/x"), &excludes));
-        assert!(!reg.is_excluded(Path::new("/etc/ssh/sshd_config"), &excludes));
-        // quirk: plain starts_with, not path-aware — "/etc/ssl" also excludes "/etc/ssl-evil"
-        assert!(reg.is_excluded(Path::new("/etc/ssl-evil/x"), &excludes));
-    }
-
-    #[test]
-    fn matches_pattern_matches_filename_only_and_ignores_invalid_patterns() {
-        let reg = Registry::empty();
-        let patterns = vec!["id_*".to_string(), "*.pem".to_string(), "config".to_string(), "[".to_string()];
-        assert!(reg.matches_pattern_with_config(Path::new("/a/b/id_rsa"), &patterns));
-        assert!(reg.matches_pattern_with_config(Path::new("/a/b/cert.pem"), &patterns));
-        assert!(reg.matches_pattern_with_config(Path::new("/etc/ssh/config"), &patterns));
-        assert!(!reg.matches_pattern_with_config(Path::new("/a/b/other.txt"), &patterns));
-        assert!(!reg.matches_pattern_with_config(Path::new("/"), &patterns));
-    }
-
-    #[test]
     fn toml_round_trip_preserves_plain_entries() {
         let mut reg = Registry::empty();
         let mut e1 = entry("/home/u/.ssh/config");
@@ -434,19 +375,5 @@ mod tests {
         assert_eq!(reg.entries.len(), 2);
         assert_eq!(reg.entries[0].category, "new");
         assert_eq!(reg.entries[1].path, "/b");
-    }
-
-    #[test]
-    fn categories_are_sorted_deduped_and_skip_empty() {
-        let mut reg = Registry::empty();
-        let mut e1 = entry("/a");
-        e1.category = "b".into();
-        let mut e2 = entry("/b");
-        e2.category = "a".into();
-        let mut e3 = entry("/c");
-        e3.category = "b".into();
-        reg.entries = vec![e1, e2, e3, entry("/d")];
-        assert_eq!(reg.categories(), vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(reg.entries_in_category("b"), vec![0usize, 2]);
     }
 }

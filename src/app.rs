@@ -201,7 +201,7 @@ impl App {
         }
         if let Some(idx) = self.selected_entry {
             if let Some(entry) = self.registry.get_entry(idx) {
-                let path = expand_path(&entry.path);
+                let path = crate::domain::rules::expand_path(&entry.path);
                 let entry_path = entry.path.clone();
                 match std::fs::metadata(&path) {
                     Ok(metadata) => {
@@ -637,7 +637,7 @@ impl App {
                         .to_string_lossy()
                         .into_owned();
                     if !self.registry.entries.iter().any(|e| e.path == path) {
-                        let category = guess_category(&path);
+                        let category = crate::domain::rules::guess_category_tui(&path);
                         self.registry.add_entry(Entry {
                             path: path.clone(),
                             category,
@@ -674,7 +674,7 @@ impl App {
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect();
                 for path in &suggestions {
-                    let category = guess_category(path);
+                    let category = crate::domain::rules::guess_category_tui(path);
                     self.registry.add_entry(Entry {
                         path: path.clone(),
                         category,
@@ -705,7 +705,7 @@ impl App {
                 // Preview selected
                 if let Some(path_buf) = self.registry.suggestions.get(self.suggestion_selected) {
                     let path = path_buf.to_string_lossy().into_owned();
-                    let expanded = expand_path(&path);
+                    let expanded = crate::domain::rules::expand_path(&path);
                     match std::fs::read_to_string(&expanded) {
                         Ok(content) => {
                             self.file_content = Some(content);
@@ -890,7 +890,7 @@ impl App {
                 return;
             }
         };
-        let path = expand_path(&entry.path);
+        let path = crate::domain::rules::expand_path(&entry.path);
         #[cfg(unix)]
         if let Ok(meta) = std::fs::metadata(&path) {
             use std::os::unix::fs::PermissionsExt;
@@ -1075,7 +1075,7 @@ impl App {
             content.push('\n');
         }
 
-        let path = expand_path(&entry.path);
+        let path = crate::domain::rules::expand_path(&entry.path);
         if let Ok(original) = std::fs::read_to_string(&path) {
             if original == content {
                 self.file_content = Some(content);
@@ -1207,7 +1207,7 @@ impl App {
             start,
             end,
             text,
-            created: iso_now(),
+            created: crate::domain::rules::iso_now(),
         });
         match crate::annotations::AnnotationsFile::save(&self.annotations) {
             Ok(()) => {
@@ -1325,15 +1325,8 @@ impl App {
         self.view_line = next as usize;
     }
 
-    /// Get entry indices in visual display order (grouped by category, alphabetical).
     fn visual_order(&self) -> Vec<usize> {
-        let categories = self.registry.categories();
-        let mut order = Vec::new();
-        for category in &categories {
-            let indices = self.registry.entries_in_category(category);
-            order.extend(indices);
-        }
-        order
+        crate::domain::rules::visual_order(&self.registry.entries)
     }
 
     fn quick_jump(&mut self, code: crossterm::event::KeyCode) {
@@ -1397,7 +1390,7 @@ impl App {
 
         if let Some(idx) = self.selected_entry {
             if let Some(entry) = self.registry.get_entry(idx) {
-                let path = expand_path(&entry.path);
+                let path = crate::domain::rules::expand_path(&entry.path);
 
                 // Check file size before loading
                 if let Ok(metadata) = std::fs::metadata(&path) {
@@ -1432,7 +1425,7 @@ impl App {
     fn open_editor(&mut self) {
         if let Some(idx) = self.selected_entry {
             if let Some(entry) = self.registry.get_entry(idx) {
-                let path = expand_path(&entry.path);
+                let path = crate::domain::rules::expand_path(&entry.path);
                 let entry_path = entry.path.clone();
                 let editor = self.config.editor();
                 let mut cmd = std::process::Command::new(&editor);
@@ -1458,7 +1451,7 @@ impl App {
     fn copy_path(&mut self) {
         if let Some(idx) = self.selected_entry {
             if let Some(entry) = self.registry.get_entry(idx) {
-                let path = expand_path(&entry.path);
+                let path = crate::domain::rules::expand_path(&entry.path);
                 let copied = self.copy_to_clipboard(&path);
                 if copied {
                     self.set_message(&format!("Copied: {}", path));
@@ -1582,7 +1575,7 @@ impl App {
 
             // Auto-detect category when path changes and category is empty
             if dialog.current_field == 0 && dialog.category.is_empty() {
-                let detected = guess_category(&dialog.path);
+                let detected = crate::domain::rules::guess_category_tui(&dialog.path);
                 if !detected.is_empty() {
                     dialog.category = detected;
                 }
@@ -1903,182 +1896,4 @@ fn edit_enter(edit: &mut EditState) {
     edit.cursor_line += 1;
     edit.cursor_col = 0;
     edit.dirty = true;
-}
-
-/// Convert days since UNIX epoch to (year, month, day).
-/// Civil-from-days algorithm (Howard Hinnant).
-pub(crate) fn days_to_ymd(days: i64) -> (i64, i64, i64) {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m as i64, d as i64)
-}
-
-/// ISO-8601 UTC timestamp for annotation records.
-fn iso_now() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| {
-            let secs = d.as_secs() as i64;
-            let (year, month, day) = days_to_ymd(secs / 86400);
-            format!(
-                "{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                year,
-                month,
-                day,
-                (secs % 86400) / 3600,
-                (secs % 3600) / 60,
-                secs % 60
-            )
-        })
-        .unwrap_or_else(|_| "unknown".to_string())
-}
-
-fn guess_category(path: &str) -> String {
-    let lower = path.to_lowercase();
-    if lower.contains(".ssh") || lower.contains("ssh_key") || lower.contains("id_") {
-        return "ssh-keys".into();
-    }
-    if lower.contains(".pem") || lower.contains(".crt") || lower.contains(".cert") {
-        return "certificates".into();
-    }
-    if lower.contains(".gnupg") || lower.contains("gpg") {
-        return "gpg".into();
-    }
-    if lower.contains("credentials") || lower.contains("secret") || lower.contains(".env") {
-        return "secrets".into();
-    }
-    if lower.contains("/etc/") {
-        return "system-config".into();
-    }
-    if lower.contains(".config") {
-        return "app-config".into();
-    }
-    "other".into()
-}
-
-fn expand_path(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, rest);
-        }
-    }
-    path.to_string()
-}
-
-// ─── Characterization tests (Phase 0) ──────────────────────────────────────
-// Pin current behavior of the pure helpers before they move to domain::rules.
-// NOTE: guess_category and expand_path here differ from the copies in main.rs;
-// both sets of tests must keep passing (behavior must not change).
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Inverse of `days_to_ymd` (Hinnant days_from_civil), for round-trip checks.
-    fn ymd_to_days(y: i64, m: i64, d: i64) -> i64 {
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = y.div_euclid(400);
-        let yoe = y - era * 400;
-        let mp = if m > 2 { m - 3 } else { m + 9 };
-        let doy = (153 * mp + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        era * 146097 + doe - 719468
-    }
-
-    #[test]
-    fn days_to_ymd_known_dates() {
-        assert_eq!(days_to_ymd(0), (1970, 1, 1));
-        assert_eq!(days_to_ymd(1), (1970, 1, 2));
-        assert_eq!(days_to_ymd(-1), (1969, 12, 31));
-        assert_eq!(days_to_ymd(59), (1970, 3, 1));
-        assert_eq!(days_to_ymd(18321), (2020, 2, 29)); // leap year
-        assert_eq!(days_to_ymd(11016), (2000, 2, 29)); // century leap year
-        assert_eq!(days_to_ymd(-25567), (1900, 1, 1)); // non-leap century boundary
-        assert_eq!(days_to_ymd(20088), (2024, 12, 31));
-    }
-
-    #[test]
-    fn days_to_ymd_round_trips_over_wide_range() {
-        for days in -100_000..=100_000 {
-            let (y, m, d) = days_to_ymd(days);
-            assert_eq!(ymd_to_days(y, m, d), days, "round trip failed at {days}");
-        }
-    }
-
-    #[test]
-    fn iso_now_has_utc_shape_and_todays_date() {
-        let now = iso_now();
-        assert_eq!(now.len(), 20, "unexpected shape: {now}");
-        assert!(now.ends_with('Z'));
-        assert_eq!(&now[4..5], "-");
-        assert_eq!(&now[7..8], "-");
-        assert_eq!(&now[10..11], "T");
-        assert_eq!(&now[13..14], ":");
-        assert_eq!(&now[16..17], ":");
-        let y: i64 = now[0..4].parse().unwrap();
-        let m: u32 = now[5..7].parse().unwrap();
-        let d: u32 = now[8..10].parse().unwrap();
-        let h: u32 = now[11..13].parse().unwrap();
-        let min: u32 = now[14..16].parse().unwrap();
-        let s: u32 = now[17..19].parse().unwrap();
-        assert!(y >= 1970 && y <= 2100);
-        assert!((1..=12).contains(&m));
-        assert!((1..=31).contains(&d));
-        assert!(h < 24 && min < 60 && s < 60);
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // allow today or yesterday (midnight race)
-        let today = days_to_ymd(secs / 86400);
-        let yesterday = days_to_ymd(secs / 86400 - 1);
-        assert!(
-            (y, m as i64, d as i64) == today || (y, m as i64, d as i64) == yesterday,
-            "date part {y:04}-{m:02}-{d:02} is not today"
-        );
-    }
-
-    #[test]
-    fn app_guess_category_branches_and_precedence() {
-        assert_eq!(guess_category("/home/u/.ssh/config"), "ssh-keys");
-        assert_eq!(guess_category("/home/u/ssh_key.pem"), "ssh-keys"); // ssh_key beats .pem
-        assert_eq!(guess_category("/home/u/keys/id_rsa"), "ssh-keys");
-        assert_eq!(guess_category("/etc/ssl/server.pem"), "certificates");
-        assert_eq!(guess_category("/etc/ssl/x.crt"), "certificates");
-        assert_eq!(guess_category("/etc/ssl/my.cert"), "certificates"); // .cert extension
-        assert_eq!(guess_category("/etc/ssl/cert-bundle"), "system-config"); // "cert" without a leading dot does NOT match ".cert"
-        assert_eq!(guess_category("/home/u/.gnupg/secring.gpg"), "gpg");
-        assert_eq!(guess_category("/home/u/.aws/credentials"), "secrets");
-        assert_eq!(guess_category("/home/u/.env"), "secrets");
-        assert_eq!(guess_category("/home/u/secret.txt"), "secrets");
-        assert_eq!(guess_category("/etc/hosts"), "system-config");
-        assert_eq!(guess_category("/home/u/.config/app/settings.json"), "app-config");
-        assert_eq!(guess_category("/var/log/x"), "other");
-        // case-insensitive
-        assert_eq!(guess_category("/HOME/U/.SSH/CONFIG"), "ssh-keys");
-    }
-
-    #[test]
-    fn app_expand_path_tilde_uses_home() {
-        match std::env::var("HOME") {
-            Ok(home) => {
-                assert_eq!(expand_path("~/x"), format!("{home}/x"));
-                assert_eq!(expand_path("~"), home);
-                // quirk: "~user" is not treated specially — "user" ends up under $HOME
-                assert_eq!(expand_path("~user/x"), format!("{home}user/x"));
-            }
-            Err(_) => {
-                assert_eq!(expand_path("~/x"), "~/x");
-            }
-        }
-        assert_eq!(expand_path("/abs/path"), "/abs/path");
-        assert_eq!(expand_path("rel/path"), "rel/path");
-    }
 }
