@@ -1,0 +1,83 @@
+root = "src"
+name = "arioch"
+
+flow = ["command-handler", "service", "use-case", "port", "store"]
+
+[[layer]]
+id = "application"
+title = "Application"
+sub = "CLI + TUI entry points"
+
+[[layer]]
+id = "domain"
+title = "Domain"
+sub = "use-cases, ports, pure domain"
+
+[[layer]]
+id = "infrastructure"
+title = "Infrastructure"
+sub = "stores and adapters"
+
+[[layer]]
+id = "composition-root"
+title = "Composition Root"
+sub = "the only place concretes are named"
+
+[[layer]]
+id = "test"
+title = "Test"
+sub = "fakes and specs"
+
+[[pattern]]
+id = "composition-root"
+layer = "composition-root"
+path = "^main\\.rs$"
+symbol = { kind = ["struct", "enum", "fn", "const", "static"] }
+
+[[pattern]]
+id = "ui-render"
+layer = "application"
+path = "ui\\.rs$"
+symbol = { kind = "fn", name = "^render_" }
+
+[[pattern]]
+id = "ui"
+layer = "application"
+path = "^ui\\.rs$"
+symbol = { kind = ["fn", "struct", "enum", "const"] }
+
+[[pattern]]
+id = "app"
+layer = "application"
+path = "^app\\.rs$"
+symbol = { kind = ["fn", "struct", "enum", "const", "static"] }
+
+[[pattern]]
+id = "config"
+layer = "application"
+path = "^config\\.rs$"
+symbol = { kind = ["struct", "fn", "static", "enum"] }
+
+[[pattern]]
+id = "knowledge"
+layer = "application"
+path = "^knowledge\\.rs$"
+symbol = { kind = ["struct", "enum", "fn"] }
+
+[[pattern]]
+id = "registry"
+layer = "application"
+path = "^registry\\.rs$"
+symbol = { kind = ["struct", "fn", "enum"] }
+
+[[pattern]]
+id = "syntax"
+layer = "application"
+path = "^syntax\\.rs$"
+symbol = { kind = ["enum", "fn", "struct"] }
+
+[[pattern]]
+id = "annotations"
+layer = "application"
+path = "^annotations\\.rs$"
+symbol = { kind = ["struct", "fn", "enum"] }

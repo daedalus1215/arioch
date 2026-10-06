@@ -1,0 +1,12 @@
+version = 1
+generated_at = "2026-10-06T22:27:20Z"
+project = "arioch"
+
+[violations.550777db98cf]
+rule = "no-global-mut"
+from = "config::CONFIG_OVERRIDE"
+
+[[progress]]
+at = "2026-10-06"
+violations = 1
+coverage = 100.0
